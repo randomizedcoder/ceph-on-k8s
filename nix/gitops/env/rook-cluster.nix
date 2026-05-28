@@ -288,6 +288,101 @@ in
       name = "rook-cluster/values.yaml";
       content = clusterValuesYaml;
     }
+
+    # ─── Ingress: dashboard + S3 ───────────────────────────────────
+    # Both share the existing cilium-ingress LoadBalancer Service
+    # (VIP 10.33.33.50). Sync-wave 1 so they land after the
+    # CephCluster + RGW Services that the chart creates at wave 0.
+    #
+    # Dashboard: cert-manager issues a TLS cert from selfsigned-lab
+    # (defined in cert-manager.nix) for ceph.lab.local; the Ingress
+    # terminates TLS and proxies to rook-ceph-mgr-dashboard:7000
+    # (plaintext because dashboard.ssl=false in the chart values).
+    #
+    # S3: plaintext HTTP at s3.lab.local → rook-ceph-rgw-ceph-objectstore:80.
+    # Path-style addressing only (`s3.lab.local/<bucket>/<key>`); the
+    # shared ingress can't do virtual-host style without a wildcard
+    # cert and a wildcard DNS entry. Use
+    # `aws --endpoint http://s3.lab.local --addressing-style path` from
+    # the dev box.
+    {
+      name = "rook-cluster/dashboard-certificate.yaml";
+      content = ''
+        apiVersion: cert-manager.io/v1
+        kind: Certificate
+        metadata:
+          name: ceph-dashboard-tls
+          namespace: ${constants.ceph.namespace}
+          annotations:
+            argocd.argoproj.io/sync-wave: "1"
+        spec:
+          secretName: ceph-dashboard-tls
+          duration: 720h0m0s     # 30 days
+          renewBefore: 168h0m0s  # 7 days
+          dnsNames:
+          - ${constants.ceph.dashboard.host}
+          issuerRef:
+            name: selfsigned-lab
+            kind: ClusterIssuer
+            group: cert-manager.io
+      '';
+    }
+    {
+      name = "rook-cluster/dashboard-ingress.yaml";
+      content = ''
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: ceph-dashboard
+          namespace: ${constants.ceph.namespace}
+          annotations:
+            argocd.argoproj.io/sync-wave: "1"
+        spec:
+          ingressClassName: cilium
+          tls:
+          - hosts:
+            - ${constants.ceph.dashboard.host}
+            secretName: ceph-dashboard-tls
+          rules:
+          - host: ${constants.ceph.dashboard.host}
+            http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: rook-ceph-mgr-dashboard
+                    port:
+                      number: 7000
+      '';
+    }
+    {
+      name = "rook-cluster/rgw-ingress.yaml";
+      content = ''
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: ceph-rgw
+          namespace: ${constants.ceph.namespace}
+          annotations:
+            argocd.argoproj.io/sync-wave: "1"
+        spec:
+          ingressClassName: cilium
+          rules:
+          - host: ${constants.ceph.rgw.host}
+            http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    # Rook names the RGW Service after the CephObjectStore.
+                    # cephObjectStores[0].name = "ceph-objectstore" above.
+                    name: rook-ceph-rgw-ceph-objectstore
+                    port:
+                      number: 80
+      '';
+    }
     {
       name = "rook-cluster/application.yaml";
       content = ''

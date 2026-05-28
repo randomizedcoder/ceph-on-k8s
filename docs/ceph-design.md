@@ -190,38 +190,49 @@ image and the PVC request to the same value keeps the layers consistent.
 ## Network exposure
 
 Two services need to be reachable from outside the cluster: the Ceph MGR
-dashboard (a web UI on port 8443 inside the cluster) and the RGW S3
-endpoint (HTTP on port 80 inside the cluster). Both are exposed via
-**Cilium L2-announced LoadBalancer VIPs**, the same mechanism the source
-repo uses for the Zot registry.
+dashboard (a web UI) and the RGW S3 endpoint. Both surface through the
+**shared `cilium-ingress` LoadBalancer Service** on VIP `10.33.33.50`
+— the same Service used by the existing ingress controller. The Cilium
+LB IP pool covers `10.33.33.50–.54` so dedicated VIPs can be carved off
+later without renumbering.
 
-| Service | Host | VIP | Mechanism | TLS |
-|---|---|---|---|---|
-| Ceph dashboard | `ceph.lab.local` | `10.33.33.53` | Cilium Ingress | Terminated at ingress, cert from cluster CA via cert-manager |
-| RGW S3 | `s3.lab.local` | `10.33.33.54` | LoadBalancer Service | Terminated at ingress, cert from cluster CA via cert-manager |
+| Service | Host | Backend | TLS |
+|---|---|---|---|
+| Ceph dashboard | `ceph.lab.local` | `rook-ceph-mgr-dashboard:7000` | Termination at Cilium Ingress, cert issued by cert-manager from the `selfsigned-lab` ClusterIssuer |
+| RGW S3 endpoint | `s3.lab.local` | `rook-ceph-rgw-ceph-objectstore:80` | Plain HTTP (path-style addressing only) |
 
-The Cilium IP pool is widened from a single `10.33.33.50` (the existing
-ingress VIP) to a range `10.33.33.50–10.33.33.54` covering both new VIPs.
-A second `CiliumL2AnnouncementPolicy` selects the ceph services by label
-so the existing ingress policy is not touched.
+Dev-box `/etc/hosts` entry:
+
+```
+10.33.33.50 ceph.lab.local s3.lab.local
+```
 
 ### Dashboard TLS approach
 
-The Rook chart can self-sign the dashboard with `dashboard.ssl: true`, but
-the result is a browser warning. Instead this design sets
-`dashboard.ssl: false` and terminates TLS at the Cilium Ingress with a
-cert issued by cert-manager from a `ClusterIssuer` backed by the
-build-time cluster CA. The dev-machine `/etc/hosts` already trusts the
-cluster CA (it's copied to the host during PKI setup), so the dashboard
-loads cleanly.
+The Rook chart can self-sign the dashboard with `dashboard.ssl: true`,
+but the result is an opaque per-pod cert that browsers warn on every
+visit. Instead the cluster sets `dashboard.ssl: false` and terminates
+TLS at the Cilium Ingress using a cert that cert-manager issues from
+the `selfsigned-lab` ClusterIssuer (an in-cluster CA defined in
+`cert-manager.nix`). Browsers warn once; one-time accept of the
+selfsigned-lab CA in the dev box's cert store removes the warning.
+
+For production, swap `selfsigned-lab` for a `cluster-ca` ClusterIssuer
+backed by the K8s Secret created from `/var/lib/kubernetes/pki/ca.{crt,key}`
+— the dev box already trusts that CA. A small change to
+`cert-manager.nix`; deferred from the lab scope.
 
 ### S3 addressing style
 
-Phase 1 supports **path-style** S3 only (`https://s3.lab.local/<bucket>/<key>`),
-because the dedicated VIP serves one virtual host. Phase 2 would add a
-wildcard cert and `*.s3.lab.local` DNS for virtual-host-style addressing;
-that's deferred since most lab clients (mc, awscli with `--addressing-style
-path`) support path-style fine.
+Phase 1 supports **path-style** S3 only
+(`http://s3.lab.local/<bucket>/<key>`) because the shared cilium-ingress
+serves one virtual host per Ingress rule. Phase 2 would add a wildcard
+cert + `*.s3.lab.local` DNS for virtual-host-style addressing; deferred
+since most lab clients (`mc`, `awscli --endpoint-url … --addressing-style
+path`) handle path-style fine. RGW is exposed via plain HTTP for the
+same reason — terminating TLS at the ingress would require a second cert
++ dedicated host, and S3 clients with `--no-verify-ssl` tolerate the
+self-signed alternative if needed later.
 
 ## Bootstrap and reconciliation
 
