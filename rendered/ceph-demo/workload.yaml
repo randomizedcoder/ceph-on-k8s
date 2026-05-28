@@ -1,0 +1,58 @@
+# Smoke pod that mounts both PVCs and exposes the OBC creds.
+# `sleep infinity` on first boot; the user runs validation
+# commands via `kubectl exec`. See README's "Quick start"
+# section for the canonical smoke test.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ceph-smoke
+  namespace: ceph-demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: ceph-smoke
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ceph-smoke
+  template:
+    metadata:
+      labels:
+        app: ceph-smoke
+    spec:
+      containers:
+      - name: smoke
+        image: busybox:1.37
+        command: ["/bin/sh", "-c", "sleep infinity"]
+        envFrom:
+        # OBC-provided AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+        - secretRef:
+            name: ceph-s3-test
+            optional: true
+        # OBC-provided BUCKET_HOST + BUCKET_NAME + BUCKET_PORT
+        # + BUCKET_REGION + BUCKET_SUBREGION
+        - configMapRef:
+            name: ceph-s3-test
+            optional: true
+        volumeMounts:
+        - name: block
+          mountPath: /data/block
+        - name: fs
+          mountPath: /data/fs
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            memory: 64Mi
+      volumes:
+      - name: block
+        persistentVolumeClaim:
+          claimName: ceph-block-test
+      - name: fs
+        persistentVolumeClaim:
+          claimName: ceph-fs-test
+

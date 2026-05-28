@@ -1,0 +1,251 @@
+    # operatorNamespace must match the rook-operator chart's namespace.
+    operatorNamespace: rook-ceph
+    clusterName: rook-ceph
+
+    # ─── Toolbox: `rook-ceph-tools` Deployment for `ceph` CLI debugging ─
+    toolbox:
+      enabled: true
+      tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+
+    # See rook-operator.nix for the reason monitoring is off — same
+    # ServiceMonitor CRD missing on this cluster.
+    monitoring:
+      enabled: false
+      createPrometheusRules: false
+
+    cephClusterSpec:
+      mon:
+        count: 3
+        allowMultiplePerNode: false
+      mgr:
+        count: 2
+        allowMultiplePerNode: false
+        modules:
+        - name: rook
+          enabled: true
+        - name: prometheus
+          enabled: true
+      dashboard:
+        enabled: true
+        # TLS is terminated at the Cilium Ingress (task #7) — the
+        # dashboard itself stays plaintext on its ClusterIP.
+        ssl: false
+
+      # ─── Network: hostNetwork ────────────────────────────────────
+      # MONs (and all other daemons) run in the host network namespace
+      # so each MON daemon binds to and advertises the node's actual
+      # IP (10.33.33.10/11/12) on ports 6789 (msgr-v1) + 3300 (msgr2).
+      # This is the standard Rook pattern for external clients: kernel
+      # CephFS clients verify that the address they connected to
+      # matches the address the MON advertised in the MON map. With
+      # regular pod networking, MONs advertise their pod IP (10.x.x.x)
+      # and external clients hitting a LoadBalancer VIP get rejected
+      # with "wrong peer at address". hostNetwork bypasses that.
+      network:
+        provider: host
+
+      # ─── Storage ─────────────────────────────────────────────────
+      # Direct device discovery: Rook's OSD prepare job for each
+      # node picks up the disk under the by-id path the microvm
+      # gives it, runs `ceph-volume raw prepare --bluestore`, and
+      # launches an OSD daemon. No CSI / StorageClass involved.
+      storage:
+        useAllNodes: false
+        useAllDevices: false
+        nodes:
+        - name: k8s-cp0
+          devices:
+          - name: "/dev/disk/by-id/virtio-ceph-osd-k8s-cp0"
+        - name: k8s-cp1
+          devices:
+          - name: "/dev/disk/by-id/virtio-ceph-osd-k8s-cp1"
+        - name: k8s-cp2
+          devices:
+          - name: "/dev/disk/by-id/virtio-ceph-osd-k8s-cp2"
+        - name: k8s-w3
+          devices:
+          - name: "/dev/disk/by-id/virtio-ceph-osd-k8s-w3"
+
+
+      # ─── Placement ────────────────────────────────────────────────
+      # MONs prefer control planes (etcd/apiserver-bearing nodes).
+      # `all` tolerations are defensive — kubelet doesn't taint CPs
+      # in this repo today, but we want Rook daemons to schedule even
+      # if that changes.
+      placement:
+        all:
+          tolerations:
+          - key: "node-role.kubernetes.io/control-plane"
+            operator: "Exists"
+            effect: "NoSchedule"
+        mon:
+          tolerations:
+          - key: "node-role.kubernetes.io/control-plane"
+            operator: "Exists"
+            effect: "NoSchedule"
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: Exists
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values: [rook-ceph-mon]
+              topologyKey: kubernetes.io/hostname
+        mgr:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values: [rook-ceph-mgr]
+              topologyKey: kubernetes.io/hostname
+
+      # ─── Resources ────────────────────────────────────────────────
+      # Sized for the 10 GiB CP / 8 GiB worker lab budget.
+      resources:
+        mon:
+          limits:
+            memory: 1Gi
+          requests:
+            cpu: 50m
+            memory: 256Mi
+        mgr:
+          limits:
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 512Mi
+        osd:
+          # 2Gi minimum because parse_env computes osd_memory_target as
+          # POD_MEMORY_LIMIT * osd_memory_target_cgroup_limit_ratio
+          # (default 0.8) and asserts if the result is below the
+          # osd_memory_target floor (~939 MB). 1Gi limit → 819 MB target
+          # → crash at config init. 2Gi → 1.6 GB target → OK.
+          limits:
+            memory: 2Gi
+          requests:
+            cpu: 200m
+            memory: 1Gi
+        prepareosd:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        mds:
+          limits:
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+
+    # ─── Block pool (RBD) ───────────────────────────────────────────
+    cephBlockPools:
+    - name: replicapool
+      spec:
+        failureDomain: host
+        replicated:
+          size: 3
+      storageClass:
+        enabled: true
+        name: ceph-block
+        isDefault: true
+        reclaimPolicy: Delete
+        allowVolumeExpansion: true
+        # The chart's templates/cephblockpool.yaml does NOT add CSI
+        # secret references — the example values.yaml expects users to
+        # include them in `parameters`. Without them, dynamic
+        # provisioning fails with "provided secret is empty".
+        parameters:
+          imageFormat: "2"
+          imageFeatures: layering
+          csi.storage.k8s.io/fstype: ext4
+          csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+          csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+          csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+          csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
+          csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+          csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+
+    # ─── Shared filesystem (CephFS, RWX) ───────────────────────────
+    cephFileSystems:
+    - name: ceph-filesystem
+      spec:
+        metadataPool:
+          replicated:
+            size: 3
+        dataPools:
+        - name: data0
+          failureDomain: host
+          replicated:
+            size: 3
+        metadataServer:
+          activeCount: 1
+          activeStandby: true
+          resources:
+            limits:
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+      storageClass:
+        enabled: true
+        name: ceph-filesystem
+        isDefault: false
+        reclaimPolicy: Delete
+        allowVolumeExpansion: true
+        parameters:
+          csi.storage.k8s.io/fstype: ext4
+          csi.storage.k8s.io/provisioner-secret-name: rook-csi-cephfs-provisioner
+          csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+          csi.storage.k8s.io/controller-expand-secret-name: rook-csi-cephfs-provisioner
+          csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
+          csi.storage.k8s.io/node-stage-secret-name: rook-csi-cephfs-node
+          csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+
+    # ─── Object store (RGW, S3) ────────────────────────────────────
+    # Chart default uses erasure coding for the data pool (2+1).
+    # We use replication-3 instead — the 4×10 GiB raw budget doesn't
+    # comfortably support EC alongside the RBD + CephFS pools.
+    cephObjectStores:
+    - name: ceph-objectstore
+      spec:
+        metadataPool:
+          failureDomain: host
+          replicated:
+            size: 3
+        dataPool:
+          failureDomain: host
+          replicated:
+            size: 3
+        preservePoolsOnDelete: false
+        gateway:
+          port: 80
+          instances: 2
+          resources:
+            limits:
+              memory: 1Gi
+            requests:
+              cpu: 200m
+              memory: 256Mi
+      storageClass:
+        enabled: true
+        name: ceph-bucket
+        reclaimPolicy: Delete
+
+    # The chart's snapshot classes are off by default; leave them off.
+    cephBlockPoolsVolumeSnapshotClass:
+      enabled: false
+    cephFileSystemVolumeSnapshotClass:
+      enabled: false
+

@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ceph-rgw
+  namespace: rook-ceph
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  ingressClassName: cilium
+  rules:
+  - host: s3.lab.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            # Rook names the RGW Service after the CephObjectStore.
+            # cephObjectStores[0].name = "ceph-objectstore" above.
+            name: rook-ceph-rgw-ceph-objectstore
+            port:
+              number: 80
+

@@ -1,0 +1,34 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rook-cluster
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/randomizedcoder/ceph-on-k8s.git
+    targetRevision: main
+    path: rendered/rook-cluster
+    directory:
+      recurse: false
+      exclude: '{application.yaml,values.yaml}'
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+      - CreateNamespace=true
+  # Rook mutates CephCluster status fields; ignore them in
+  # diffs so ArgoCD doesn't flap.
+  ignoreDifferences:
+  - group: ceph.rook.io
+    kind: CephCluster
+    jsonPointers:
+    - /spec/security
+    - /status
+
