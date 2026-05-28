@@ -96,6 +96,48 @@ in
     }
   '';
 
+  # Check Rook-Ceph cluster health: HEALTH_OK and ${expectedOsds} OSDs up,in
+  # via `kubectl exec -n rook-ceph deploy/rook-ceph-tools -- ceph -s`.
+  # Used as the storage-tier gate in the lifecycle cluster test.
+  mkCheckCephHealthyScript = ''
+    check_ceph_healthy() {
+      local host="$1"
+      local expected_osds="$2"
+      local out
+      out=$(sshpass -p ${mainConstants.ssh.password} ssh ${sshOpts} \
+        "root@$host" "KUBECONFIG=${mainConstants.k8s.pkiDir}/admin-kubeconfig \
+          kubectl -n ${mainConstants.ceph.namespace} exec deploy/rook-ceph-tools \
+          -- ceph -s --format json" 2>/dev/null)
+      if [[ -z "$out" ]]; then
+        return 1
+      fi
+      # Parse health.status and osdmap.num_up_osds out of `ceph -s --format json`.
+      # Avoids jq dependency on the host by using awk.
+      local health up in
+      health=$(echo "$out" | sed -n 's/.*"status":"\(HEALTH_[A-Z_]*\)".*/\1/p' | head -1)
+      up=$(echo "$out" | sed -n 's/.*"num_up_osds":\([0-9]*\).*/\1/p' | head -1)
+      in=$(echo "$out" | sed -n 's/.*"num_in_osds":\([0-9]*\).*/\1/p' | head -1)
+      [[ "$health" = "HEALTH_OK" ]] && \
+        [[ "''${up:-0}" -ge "$expected_osds" ]] && \
+        [[ "''${in:-0}"  -ge "$expected_osds" ]]
+    }
+
+    wait_for_ceph_healthy() {
+      local host="$1"
+      local expected_osds="$2"
+      local timeout="$3"
+      local elapsed=0
+      while [[ $elapsed -lt $timeout ]]; do
+        if check_ceph_healthy "$host" "$expected_osds"; then
+          return 0
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+      done
+      return 1
+    }
+  '';
+
   # SSH helper
   mkSshHelper = ''
     ssh_cmd() {
