@@ -183,6 +183,21 @@ in
             }
         fi
 
+        # ── 1e. CephCluster CR + pools + filesystem + object store ─────
+        # The CR triggers operator-driven creation of MONs, MGRs, OSDs,
+        # MDS, RGW. OSD prepare takes ~2-3 min per OSD, so we use a
+        # generous wait. ArgoCD reconciles thereafter via the
+        # rook-cluster Application CR.
+        if [ -f ${cfg.manifestsPath}/rook-cluster/install.yaml ]; then
+          apply_file ${cfg.manifestsPath}/rook-cluster/install.yaml
+          log "waiting for CephCluster phase=Ready (this can take 10+ minutes on cold boot)"
+          kubectl -n ${constants.ceph.namespace} wait \
+            --for=jsonpath='{.status.phase}'=Ready \
+            cephcluster/rook-ceph --timeout=900s || {
+              log "WARN: CephCluster not Ready within 15 min; continuing — ArgoCD will keep reconciling"
+            }
+        fi
+
         # ── 2. ArgoCD ──────────────────────────────────────────────────
         if [ -f ${cfg.manifestsPath}/argocd/install.yaml ]; then
 
