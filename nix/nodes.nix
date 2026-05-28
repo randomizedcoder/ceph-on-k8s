@@ -1,7 +1,11 @@
 # nix/nodes.nix
 #
-# Node definitions for the K8s cluster.
-# 3 control planes + 1 worker (HA configuration).
+# Node definitions.
+#
+# - `definitions`        : K8s cluster members (3 CP + 1 worker)
+# - `clientDefinitions`  : external Ceph clients (NOT part of the K8s cluster).
+#                          Same TAP/IP/key infrastructure as cluster nodes
+#                          but driven by a separate microvm generator.
 #
 { constants }:
 rec {
@@ -44,5 +48,18 @@ rec {
     };
   };
 
+  # External-client microvms. Same lab bridge, separate lifecycle.
+  # `role = "ceph-client"` is informational; microvm-client.nix is
+  # generic and just consumes nodeName + a few constants.
+  clientDefinitions = {
+    client0 = {
+      role = "ceph-client";
+      nodeIndex = 20;
+      description = "External CephFS client (mounts /mnt/cephfs at boot)";
+      services = [ "sshd" "mnt-cephfs.mount" ];
+    };
+  };
+
   nodeNames = builtins.attrNames definitions;
+  clientNodeNames = builtins.attrNames clientDefinitions;
 }

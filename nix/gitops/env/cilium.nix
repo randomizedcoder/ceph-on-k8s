@@ -135,10 +135,11 @@ in
       name = "cilium/values.yaml";
       content = valuesYaml;
     }
-    # ─── LoadBalancer IP pool for cilium-ingress ──────────────────────
+    # ─── LoadBalancer IP pool for cilium-ingress + Ceph LBs ──────────
     # Kept as raw YAML (not Helm-templated) so the pool/policy are
-    # co-located with the module that enables the feature. Block is
-    # deliberately small — we only need one VIP today (ingress).
+    # co-located with the module that enables the feature. The range
+    # covers cilium-ingress (.50) + the dashboard/RGW/MON LBs added by
+    # rook-cluster.nix (.53–.57). See constants.cilium.ingress comment.
     {
       name = "cilium/lb-ip-pool.yaml";
       content = ''
@@ -159,12 +160,14 @@ in
             stop:  "${constants.cilium.ingress.vipStop}"
       '';
     }
-    # ─── L2 announcement policy ────────────────────────────────────────
+    # ─── L2 announcement policy (cilium-ingress only) ─────────────────
     # Cilium labels the auto-created cilium-ingress Service with
     # `cilium.io/ingress: "true"` (confirmed in the rendered install.yaml).
     # Scoping the selector to that label means we only ARP-announce the
-    # ingress VIP for now — future LB Services need their own policy
-    # (or a broadened selector) to opt in.
+    # ingress VIP here. The Ceph MON LB Services have their own
+    # `lab-l2-rook` policy added by nix/gitops/env/rook-cluster.nix —
+    # keeping them separate so cilium-ingress is unaffected if rook
+    # is wiped.
     # The interface name is the VM-side NIC (verified via `ip -br link`
     # on cp0: enp0s4, the virtio-net device cloud-init renames to).
     {

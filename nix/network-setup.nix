@@ -10,7 +10,9 @@ let
   nodes = (import ./nodes.nix { inherit constants; }).definitions;
   inherit (constants.network) bridge gateway4 gateway6 subnet4 subnet6;
 
-  tapList = builtins.map (n: constants.network.taps.${n}) constants.nodeNames;
+  # `allNodeNames` covers both the K8s cluster and the external Ceph
+  # client microvms so a single network-setup run gives every VM a TAP.
+  tapList = builtins.map (n: constants.network.taps.${n}) constants.allNodeNames;
 
   # Control plane node IPs for haproxy backend
   cpNodes = builtins.filter (n: nodes.${n}.role == "control-plane") constants.nodeNames;

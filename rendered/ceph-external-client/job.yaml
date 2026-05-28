@@ -1,0 +1,86 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ceph-auth-import-external
+  namespace: rook-ceph
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  backoffLimit: 30
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: ceph-auth-importer
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: importer
+        # Same image rook-ceph-tools uses — already pulled on
+        # every node, has bash + ceph CLI.
+        image: quay.io/ceph/ceph:v19.2.3
+        env:
+        - name: CEPH_USER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cephfs-client-secret
+              key: key
+        command: ["bash", "-euxc"]
+        args:
+        - |
+          # Build /etc/ceph/{ceph.conf,keyring} from the same
+          # admin Secret that the toolbox uses. The ceph-config
+          # volume is emptyDir so we have somewhere to write.
+          MON_HOSTS=$(awk -F= '{print $NF}' /etc/rook/mon-endpoints)
+          cat > /etc/ceph/ceph.conf <<EOF
+          [global]
+          mon_host = $MON_HOSTS
+          EOF
+          cat > /etc/ceph/keyring <<EOF
+          [client.admin]
+          	key = $(cat /var/lib/rook-ceph-mon/secret.keyring)
+          EOF
+
+          # Build the external client's keyring file inline
+          # from the Secret value. Caps are included so that
+          # `ceph auth import` registers the user + caps in one
+          # call (the alternative path, `ceph auth caps` after
+          # import, is also fine and idempotent — but `import`
+          # rejects keyrings without caps).
+          cat > /tmp/external.keyring <<EOF
+          [client.external]
+          	key = $CEPH_USER_KEY
+          	caps mon = "allow r fsname=ceph-filesystem"
+          	caps mds = "allow rw fsname=ceph-filesystem"
+          	caps osd = "allow rw tag cephfs data=ceph-filesystem"
+          EOF
+
+          ceph auth import -i /tmp/external.keyring
+
+          # Ensure caps stay current even after re-runs where
+          # someone has manually edited them.
+          ceph auth caps client.external \
+            mon "allow r fsname=ceph-filesystem" \
+            mds "allow rw fsname=ceph-filesystem" \
+            osd "allow rw tag cephfs data=ceph-filesystem"
+
+          # Verification — fail the Job if the user didn't land.
+          ceph auth get client.external
+        volumeMounts:
+        - { name: ceph-config,   mountPath: /etc/ceph }
+        - { name: mon-endpoints, mountPath: /etc/rook }
+        - { name: admin-secret,  mountPath: /var/lib/rook-ceph-mon, readOnly: true }
+      volumes:
+      - name: ceph-config
+        emptyDir: {}
+      - name: mon-endpoints
+        configMap:
+          name: rook-ceph-mon-endpoints
+          items:
+          - { key: data, path: mon-endpoints }
+      - name: admin-secret
+        secret:
+          secretName: rook-ceph-mon
+          items:
+          - { key: ceph-secret, path: secret.keyring }
+

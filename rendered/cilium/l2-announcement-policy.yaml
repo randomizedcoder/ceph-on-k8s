@@ -10,7 +10,7 @@ spec:
     matchLabels:
       cilium.io/ingress: "true"
   interfaces:
-  - enp0s4
+  - enp0s5
   externalIPs: true
   loadBalancerIPs: true
 

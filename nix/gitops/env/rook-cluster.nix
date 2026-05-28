@@ -277,6 +277,75 @@ ${perNodeDevicesYaml}
     chart       = constants.helmCharts.rookCephCluster;
     values      = clusterValuesYaml;
   };
+
+  # ─── MON LoadBalancer Services (for external CephFS clients) ─────
+  # Three Services, one per MON pod (rook labels each MON pod with
+  # `ceph_daemon_id=a|b|c`). Each Service sits on a dedicated VIP via
+  # cilium's lbipam annotation. The matching L2 announcement policy
+  # ARP-broadcasts the VIPs on the lab bridge.
+  #
+  # Without these, the MONs only have ClusterIPs and clients outside
+  # the cluster (like the client0 microvm) can't reach them.
+  mkMonLbService = mon: {
+    name = "rook-cluster/mon-${mon}-service.yaml";
+    content = ''
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: rook-ceph-mon-${mon}-lb
+        namespace: ${constants.ceph.namespace}
+        # Labels here (not just pod selector below) are what the
+        # CiliumL2AnnouncementPolicy `serviceSelector` matches against.
+        labels:
+          app: rook-ceph-mon
+          ceph_daemon_id: ${mon}
+        annotations:
+          argocd.argoproj.io/sync-wave: "1"
+          lbipam.cilium.io/ips: "${constants.ceph.mon.${mon}.vip}"
+      spec:
+        type: LoadBalancer
+        # externalTrafficPolicy: Cluster (the default) — Cilium picks
+        # an L2-announce node independently of MON pod placement; with
+        # `Local` the announce-node and the pod-node have to coincide
+        # or traffic gets dropped, and Cilium's lease holder isn't
+        # constrained to do that.
+        externalTrafficPolicy: Cluster
+        selector:
+          app: rook-ceph-mon
+          mon_cluster: ${constants.ceph.namespace}
+          ceph_daemon_id: ${mon}
+        ports:
+        - { name: msgr2,   port: 3300, targetPort: 3300, protocol: TCP }
+        - { name: msgr-v1, port: 6789, targetPort: 6789, protocol: TCP }
+    '';
+  };
+
+  monLbManifests = builtins.map mkMonLbService [ "a" "b" "c" ];
+
+  monL2PolicyManifest = {
+    name = "rook-cluster/mon-l2-announcement-policy.yaml";
+    content = ''
+      # ARP-announce the MON LB VIPs on the lab bridge. Selects every
+      # Service whose pods carry `app=rook-ceph-mon` (which is the
+      # three -lb Services above plus the chart's internal ClusterIP
+      # mons; loadBalancerIPs filtering means only LB-typed Services
+      # actually get a VIP announced).
+      apiVersion: cilium.io/v2alpha1
+      kind: CiliumL2AnnouncementPolicy
+      metadata:
+        name: lab-l2-rook
+        annotations:
+          argocd.argoproj.io/sync-wave: "1"
+      spec:
+        serviceSelector:
+          matchExpressions:
+          - { key: app, operator: In, values: [ rook-ceph-mon ] }
+        interfaces:
+        - ${constants.cilium.ingress.nic}
+        externalIPs: true
+        loadBalancerIPs: true
+    '';
+  };
 in
 {
   manifests = [
@@ -421,5 +490,5 @@ in
             - /status
       '';
     }
-  ];
+  ] ++ monLbManifests ++ [ monL2PolicyManifest ];
 }

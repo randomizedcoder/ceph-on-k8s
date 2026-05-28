@@ -11,10 +11,19 @@
 # The `source` form lets helm-template outputs flow through to rendered/
 # without going via a Nix string (which would IFD-load the contents).
 #
-{ pkgs, lib, nixidy ? null }:
+{ pkgs, lib, secrets ? null, nixidy ? null }:
 let
   envDir = ./env;
   helm = import ./helm-chart.nix { inherit pkgs lib; };
+
+  # Fallback secrets stub for the case where ./secrets/ doesn't exist
+  # — keeps the manifest derivation buildable even without a key.
+  emptySecrets = {
+    cephClientSecret = null;
+    cephKeyringPath = null;
+    cephConf = null;
+  };
+  secrets' = if secrets == null then emptySecrets else secrets;
 
   # Import environment modules.
   base          = import (envDir + "/base.nix")           { inherit pkgs lib; };
@@ -24,6 +33,10 @@ let
   rookOperator  = import (envDir + "/rook-operator.nix")  { inherit pkgs lib helm; };
   rookCluster   = import (envDir + "/rook-cluster.nix")   { inherit pkgs lib helm; };
   cephDemo      = import (envDir + "/ceph-demo.nix")      { inherit pkgs lib; };
+  cephExternalClient = import (envDir + "/ceph-external-client.nix") {
+    inherit pkgs lib;
+    secrets = secrets';
+  };
 
   # Combine all manifests
   allManifests = base.manifests
@@ -32,7 +45,8 @@ let
     ++ certManager.manifests
     ++ rookOperator.manifests
     ++ rookCluster.manifests
-    ++ cephDemo.manifests;
+    ++ cephDemo.manifests
+    ++ cephExternalClient.manifests;
 
   emitStep = m:
     if m ? source then ''

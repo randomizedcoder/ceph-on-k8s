@@ -8,18 +8,32 @@
 #
 rec {
   # ─── Node Configuration ──────────────────────────────────────────────
+  # K8s cluster members. External Ceph clients live in clientNodeNames
+  # below; they share the bridge but are NOT part of the cluster.
   nodeNames = [ "cp0" "cp1" "cp2" "w3" ];
+
+  # External Ceph clients (NixOS microvms running outside Kubernetes,
+  # consuming CephFS via the kernel client). The host's bridge/TAP
+  # setup, SSH key infra, and known_hosts treat these the same as the
+  # cluster nodes; only flake.nix and microvm-scripts.nix differ.
+  clientNodeNames = [ "client0" ];
+
+  # Convenience: every microvm name. Used by the host network setup
+  # to enumerate TAPs and by secrets-gen.nix to enumerate host keys.
+  allNodeNames = nodeNames ++ clientNodeNames;
 
   # ─── Network Configuration ──────────────────────────────────────────
   network = {
     bridge = "k8sbr0";
 
-    # Per-node TAP devices
+    # Per-node TAP devices. .20 is reserved for external client(s) so
+    # the cluster range stays contiguous at .10–.13.
     taps = {
-      cp0 = "k8stap0";
-      cp1 = "k8stap1";
-      cp2 = "k8stap2";
-      w3  = "k8stap3";
+      cp0     = "k8stap0";
+      cp1     = "k8stap1";
+      cp2     = "k8stap2";
+      w3      = "k8stap3";
+      client0 = "k8stap4";
     };
 
     # Host bridge addresses (dual-stack)
@@ -30,24 +44,27 @@ rec {
 
     # Per-node IP addresses
     ipv4 = {
-      cp0 = "10.33.33.10";
-      cp1 = "10.33.33.11";
-      cp2 = "10.33.33.12";
-      w3  = "10.33.33.13";
+      cp0     = "10.33.33.10";
+      cp1     = "10.33.33.11";
+      cp2     = "10.33.33.12";
+      w3      = "10.33.33.13";
+      client0 = "10.33.33.20";
     };
     ipv6 = {
-      cp0 = "fd33:33:33::10";
-      cp1 = "fd33:33:33::11";
-      cp2 = "fd33:33:33::12";
-      w3  = "fd33:33:33::13";
+      cp0     = "fd33:33:33::10";
+      cp1     = "fd33:33:33::11";
+      cp2     = "fd33:33:33::12";
+      w3      = "fd33:33:33::13";
+      client0 = "fd33:33:33::20";
     };
 
     # Per-node MAC addresses
     macs = {
-      cp0 = "02:00:0a:21:21:10";
-      cp1 = "02:00:0a:21:21:11";
-      cp2 = "02:00:0a:21:21:12";
-      w3  = "02:00:0a:21:21:13";
+      cp0     = "02:00:0a:21:21:10";
+      cp1     = "02:00:0a:21:21:11";
+      cp2     = "02:00:0a:21:21:12";
+      w3      = "02:00:0a:21:21:13";
+      client0 = "02:00:0a:21:21:20";
     };
   };
 
@@ -84,10 +101,11 @@ rec {
     virtioOffset = 1;
 
     nodeBlocks = {
-      cp0 = 0;    # 25500-25509
-      cp1 = 10;   # 25510-25519
-      cp2 = 20;   # 25520-25529
-      w3  = 30;   # 25530-25539
+      cp0     = 0;    # 25500-25509
+      cp1     = 10;   # 25510-25519
+      cp2     = 20;   # 25520-25529
+      w3      = 30;   # 25530-25539
+      client0 = 40;   # 25540-25549
     };
   };
 
@@ -148,19 +166,25 @@ rec {
   # (`cilium-ingress` in kube-system) whose IP is pulled from the
   # LoadBalancer IP pool below and advertised to the LAN via L2 ARP.
   #
-  # The pool range covers 10.33.33.50–.54:
+  # The pool range covers 10.33.33.50–.57:
   #   .50 — cilium-ingress (shared HTTP/HTTPS ingress)
   #   .53 — Ceph MGR dashboard LB (filled in by ceph attrset)
   #   .54 — Ceph RGW S3 endpoint LB (filled in by ceph attrset)
+  #   .55 — Ceph MON-a LB (for external CephFS clients; ceph.mon.a)
+  #   .56 — Ceph MON-b LB
+  #   .57 — Ceph MON-c LB
   cilium = {
     ingress = {
       vip      = "10.33.33.50";
       vipStart = "10.33.33.50";
-      vipStop  = "10.33.33.54";
-      # VM-side NIC name (cloud-init renames virtio-net to enp0s4 on
-      # these guests; verify with `ip -br link` before first apply if
-      # you change the VM image).
-      nic      = "enp0s4";
+      vipStop  = "10.33.33.57";
+      # VM-side NIC name on the K8s cluster nodes — the cilium agent
+      # ARP-announces VIPs out of this interface. Cluster nodes have a
+      # second virtio-blk (the ceph OSD disk) which bumps the PCI
+      # numbering so the virtio-net lands at s5, not s4 (client0,
+      # which has no second disk, sees its NIC as enp0s4 — but
+      # client0 doesn't host L2 announce, only consumes VIPs).
+      nic      = "enp0s5";
     };
   };
 
@@ -220,6 +244,30 @@ rec {
     };
     dashboard = { host = "ceph.lab.local"; vip = "10.33.33.53"; };
     rgw       = { host = "s3.lab.local";   vip = "10.33.33.54"; };
+
+    # Per-MON LoadBalancer VIPs for clients that live outside the
+    # Kubernetes cluster but on the same lab bridge (e.g. the
+    # client0 microvm). Three separate VIPs — one per Ceph MON
+    # pod — so the kernel CephFS client can talk to a quorum
+    # directly without going through the cilium-ingress L7 proxy.
+    # ARP-announced by the lab-l2-rook CiliumL2AnnouncementPolicy
+    # added in rook-cluster.nix. The MON list below is what
+    # external clients' /etc/ceph/ceph.conf points at.
+    mon = {
+      a = { vip = "10.33.33.55"; };
+      b = { vip = "10.33.33.56"; };
+      c = { vip = "10.33.33.57"; };
+    };
+
+    # External CephFS user that the client0 microvm uses to mount
+    # the filesystem. The keyring is pre-generated by
+    # k8s-gen-secrets and applied to the cluster by the
+    # ceph-external-client env module's Job.
+    externalClient = {
+      user     = "external";   # CephX user name (full name: client.external)
+      fsName   = "ceph-filesystem";
+      mountDir = "/mnt/cephfs";
+    };
   };
 
   # ─── ArgoCD service (NodePort reachable from host) ─────────────────

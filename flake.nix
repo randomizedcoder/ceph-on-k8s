@@ -75,8 +75,10 @@
         # Secrets generation script
         secretsGen = import (nixDir + "/secrets-gen.nix") { inherit pkgs; };
 
-        # GitOps manifest generator (also consumed by the bootstrap unit)
-        gitops = import (nixDir + "/gitops") { inherit pkgs lib; };
+        # GitOps manifest generator (also consumed by the bootstrap unit).
+        # `secrets` is passed through so ceph-external-client can embed
+        # the CephX secret key in its Kubernetes Secret manifest.
+        gitops = import (nixDir + "/gitops") { inherit pkgs lib secrets; };
         k8sManifests = gitops.packages.k8s-manifests;
 
         # ─── MicroVM Generator ───────────────────────────────────────────
@@ -97,6 +99,27 @@
           })
         ) nodes.definitions;
 
+        # ─── External Ceph-client MicroVM(s) ─────────────────────────────
+        # Same TAP + SSH infrastructure as the cluster nodes, but a
+        # separate generator with no K8s scaffolding. The client mounts
+        # CephFS at /mnt/cephfs at boot using the build-time keyring
+        # produced by k8s-gen-secrets and the matching CephX user
+        # registered by the ceph-external-client env module.
+        mkClientNode = { nodeName }:
+          import (nixDir + "/microvm-client.nix") {
+            inherit pkgs lib microvm nixpkgs system nodeName sshPubKey;
+            hostKey          = hostKeyPath nodeName;
+            cephConf         = secrets.cephConf;
+            cephKeyring      = secrets.cephKeyringPath;
+            cephClientSecret = secrets.cephClientSecret;
+          };
+
+        clientPackages = lib.mapAttrs' (name: _:
+          lib.nameValuePair "k8s-microvm-${name}" (mkClientNode {
+            nodeName = name;
+          })
+        ) nodes.clientDefinitions;
+
         # Import lifecycle testing framework (Linux only)
         lifecycle = lib.optionalAttrs pkgs.stdenv.isLinux (
           import (nixDir + "/lifecycle") { inherit pkgs lib knownHostsPath; }
@@ -107,7 +130,7 @@
 
       in
       {
-        packages = vmPackages // lib.optionalAttrs pkgs.stdenv.isLinux (
+        packages = vmPackages // clientPackages // lib.optionalAttrs pkgs.stdenv.isLinux (
           # Lifecycle test packages
           (lifecycle.packages or {})
           # GitOps manifests
@@ -204,6 +227,20 @@
             k8s-chaos-failover = {
               type = "app";
               program = "${chaosScripts.chaosFailover}/bin/k8s-chaos-failover";
+            };
+
+            # External Ceph-client lifecycle (separate from k8s-start-all)
+            k8s-client-start = {
+              type = "app";
+              program = "${vmScripts.clientStart}/bin/k8s-client-start";
+            };
+            k8s-client-stop = {
+              type = "app";
+              program = "${vmScripts.clientStop}/bin/k8s-client-stop";
+            };
+            k8s-client-wipe = {
+              type = "app";
+              program = "${vmScripts.clientWipe}/bin/k8s-client-wipe";
             };
           }
 

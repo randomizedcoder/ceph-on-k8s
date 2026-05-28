@@ -234,6 +234,110 @@ same reason — terminating TLS at the ingress would require a second cert
 + dedicated host, and S3 clients with `--no-verify-ssl` tolerate the
 self-signed alternative if needed later.
 
+## External CephFS client (`client0` microvm)
+
+A NixOS microvm sitting on the same `k8sbr0` bridge as the K8s cluster
+but **not** running Kubernetes. Demonstrates that CephFS can be mounted
+from a real OS — no Rook CSI driver — exactly the way you'd mount it
+from a bare-metal box.
+
+### Topology
+
+| Piece | Value |
+|---|---|
+| Host | `client0` / `k8s-client0`, IP `10.33.33.20`, TAP `k8stap4`, console block 25540–25549 |
+| Disk | Single 4 GiB `${hostname}-data.img` mounted at `/var/lib`. No second disk. |
+| Resources | 2 GiB RAM, 1 vCPU. |
+| Lifecycle | Independent of the cluster — `nix run .#k8s-client-start` / `…-stop` / `…-wipe`. NOT part of `k8s-start-all`. |
+
+### MON exposure
+
+Three dedicated LoadBalancer VIPs (`10.33.33.55` / `.56` / `.57`), one
+per MON pod, ARP-announced by a new `lab-l2-rook`
+`CiliumL2AnnouncementPolicy`. The Cilium LB IP pool widened from
+`.50–.54` to `.50–.57` to cover them. The Services use selectors
+`app=rook-ceph-mon`, `mon_cluster=rook-ceph`,
+`ceph_daemon_id={a|b|c}` so each VIP routes to exactly one MON pod.
+
+The client's `/etc/ceph/ceph.conf` is just:
+
+```ini
+[global]
+mon_host = 10.33.33.55:3300,10.33.33.56:3300,10.33.33.57:3300
+ms_mode = prefer-crc
+```
+
+### CephX user (`client.external`)
+
+Deterministic, build-time:
+
+1. `nix run .#k8s-gen-secrets` produces a 30-byte CephX key blob
+   (type=1, timestamp, length, 16-byte AES-128 key) into
+   `secrets/cephfs-client.{secret,keyring}`. Plain `openssl rand 16`
+   isn't enough — `ceph auth import` rejects it as "Malformed input".
+2. A Kubernetes Job (`ceph-auth-import-external`) in `rook-ceph`
+   mounts the same `rook-ceph-mon` admin Secret that
+   `rook-ceph-tools` uses, builds a working `/etc/ceph/keyring`
+   on-the-fly, then runs:
+
+   ```
+   ceph auth import -i /tmp/external.keyring  # caps inlined
+   ceph auth caps client.external \
+     mon "allow r fsname=ceph-filesystem" \
+     mds "allow rw fsname=ceph-filesystem" \
+     osd "allow rw tag cephfs data=ceph-filesystem"
+   ```
+
+   The Job is idempotent (same secret → no-op import; caps overwrite).
+
+### Mount mechanics
+
+`nix/microvm-client.nix` deliberately avoids `pkgs.ceph` /
+`pkgs.ceph-client` because they currently pull in a Python tree that
+clashes with nixpkgs' Sphinx version. Instead, the **kernel**'s CephFS
+client does the work and the secret is inlined into the mount options:
+
+```nix
+fileSystems."/mnt/cephfs" = {
+  device = "10.33.33.55:3300,10.33.33.56:3300,10.33.33.57:3300:/";
+  fsType = "ceph";
+  options = [
+    "name=external"
+    "secret=${cephClientSecret}"   # base64 key, inlined at build time
+    "fs=ceph-filesystem"
+    "ms_mode=prefer-crc"
+    "noatime" "_netdev"
+    "x-systemd.requires=network-online.target"
+    "x-systemd.after=network-online.target"
+    "nofail"
+  ];
+};
+```
+
+`mount.ceph` is not required — the kernel parses these options
+directly. `nofail` means the boot doesn't block forever if MONs are
+unreachable; SSH still comes up so the operator can diagnose.
+
+### Bidirectional verification
+
+```bash
+# from the client
+nix run .#k8s-vm-ssh -- --node=client0 -- 'mount | grep cephfs'
+# cephfs on /mnt/cephfs type ceph (rw,relatime,name=external,...)
+
+nix run .#k8s-vm-ssh -- --node=client0 -- \
+  'echo "from-client @ $(date)" > /mnt/cephfs/external.txt'
+
+# read the same file from the in-cluster ceph-demo pod
+nix run .#k8s-vm-ssh -- --node=cp0 -- \
+  'kubectl -n ceph-demo exec deploy/ceph-smoke -- cat /data/fs/external.txt'
+
+# and the reverse direction
+nix run .#k8s-vm-ssh -- --node=cp0 -- \
+  'kubectl -n ceph-demo exec deploy/ceph-smoke -- sh -c "echo from-pod > /data/fs/pod.txt"'
+nix run .#k8s-vm-ssh -- --node=client0 -- 'cat /mnt/cephfs/pod.txt'
+```
+
 ## Bootstrap and reconciliation
 
 The CephCluster does not come up by ArgoCD — it comes up by the

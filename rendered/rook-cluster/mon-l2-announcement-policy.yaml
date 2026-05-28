@@ -1,0 +1,20 @@
+# ARP-announce the MON LB VIPs on the lab bridge. Selects every
+# Service whose pods carry `app=rook-ceph-mon` (which is the
+# three -lb Services above plus the chart's internal ClusterIP
+# mons; loadBalancerIPs filtering means only LB-typed Services
+# actually get a VIP announced).
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: lab-l2-rook
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  serviceSelector:
+    matchExpressions:
+    - { key: app, operator: In, values: [ rook-ceph-mon ] }
+  interfaces:
+  - enp0s5
+  externalIPs: true
+  loadBalancerIPs: true
+
