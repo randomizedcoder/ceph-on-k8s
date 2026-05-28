@@ -1,0 +1,243 @@
+# operatorNamespace must match the rook-operator chart's namespace.
+operatorNamespace: rook-ceph
+clusterName: rook-ceph
+
+# ─── Toolbox: `rook-ceph-tools` Deployment for `ceph` CLI debugging ─
+toolbox:
+  enabled: true
+  tolerations:
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+monitoring:
+  enabled: true
+  createPrometheusRules: false
+
+cephClusterSpec:
+  mon:
+    count: 3
+    allowMultiplePerNode: false
+  mgr:
+    count: 2
+    allowMultiplePerNode: false
+    modules:
+    - name: rook
+      enabled: true
+    - name: prometheus
+      enabled: true
+  dashboard:
+    enabled: true
+    # TLS is terminated at the Cilium Ingress (task #7) — the
+    # dashboard itself stays plaintext on its ClusterIP.
+    ssl: false
+
+  # ─── Storage ─────────────────────────────────────────────────
+  # PVC-based OSDs: one per node, claimed from the openebs-device
+  # StorageClass. The CSI provisioner binds each PVC to the GPT
+  # partition labeled `ceph-osd` on the node where the OSD pod
+  # schedules (volumeBindingMode=WaitForFirstConsumer on the SC).
+  storage:
+    useAllNodes: false
+    useAllDevices: false
+    storageClassDeviceSets:
+    - name: ceph-osd-set
+      count: 4
+      portable: false
+      tuneDeviceClass: true
+      tuneFastDeviceClass: false
+      encrypted: false
+      placement:
+        tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+        topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchExpressions:
+            - key: app
+              operator: In
+              values: [rook-ceph-osd, rook-ceph-osd-prepare]
+      preparePlacement:
+        tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+      resources:
+        limits:
+          memory: 1Gi
+        requests:
+          cpu: 200m
+          memory: 512Mi
+      volumeClaimTemplates:
+      - metadata:
+          name: data
+        spec:
+          storageClassName: openebs-device
+          accessModes: [ReadWriteOnce]
+          volumeMode: Block
+          resources:
+            requests:
+              storage: 10Gi
+
+  # ─── Placement ────────────────────────────────────────────────
+  # MONs prefer control planes (etcd/apiserver-bearing nodes).
+  # `all` tolerations are defensive — kubelet doesn't taint CPs
+  # in this repo today, but we want Rook daemons to schedule even
+  # if that changes.
+  placement:
+    all:
+      tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+    mon:
+      tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+          - matchExpressions:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+            - key: app
+              operator: In
+              values: [rook-ceph-mon]
+          topologyKey: kubernetes.io/hostname
+    mgr:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+            - key: app
+              operator: In
+              values: [rook-ceph-mgr]
+          topologyKey: kubernetes.io/hostname
+
+  # ─── Resources ────────────────────────────────────────────────
+  # Sized for the 10 GiB CP / 8 GiB worker lab budget.
+  resources:
+    mon:
+      limits:
+        memory: 1Gi
+      requests:
+        cpu: 50m
+        memory: 256Mi
+    mgr:
+      limits:
+        memory: 1Gi
+      requests:
+        cpu: 100m
+        memory: 512Mi
+    osd:
+      limits:
+        memory: 1Gi
+      requests:
+        cpu: 200m
+        memory: 512Mi
+    prepareosd:
+      limits:
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+    mds:
+      limits:
+        memory: 1Gi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+
+# ─── Block pool (RBD) ───────────────────────────────────────────
+cephBlockPools:
+- name: replicapool
+  spec:
+    failureDomain: host
+    replicated:
+      size: 3
+  storageClass:
+    enabled: true
+    name: ceph-block
+    isDefault: true
+    reclaimPolicy: Delete
+    allowVolumeExpansion: true
+    parameters:
+      imageFormat: "2"
+      imageFeatures: layering
+      csi.storage.k8s.io/fstype: ext4
+
+# ─── Shared filesystem (CephFS, RWX) ───────────────────────────
+cephFileSystems:
+- name: ceph-filesystem
+  spec:
+    metadataPool:
+      replicated:
+        size: 3
+    dataPools:
+    - name: data0
+      failureDomain: host
+      replicated:
+        size: 3
+    metadataServer:
+      activeCount: 1
+      activeStandby: true
+      resources:
+        limits:
+          memory: 1Gi
+        requests:
+          cpu: 100m
+          memory: 256Mi
+  storageClass:
+    enabled: true
+    name: ceph-filesystem
+    isDefault: false
+    reclaimPolicy: Delete
+    allowVolumeExpansion: true
+    parameters:
+      csi.storage.k8s.io/fstype: ext4
+
+# ─── Object store (RGW, S3) ────────────────────────────────────
+# Chart default uses erasure coding for the data pool (2+1).
+# We use replication-3 instead — the 4×10 GiB raw budget doesn't
+# comfortably support EC alongside the RBD + CephFS pools.
+cephObjectStores:
+- name: ceph-objectstore
+  spec:
+    metadataPool:
+      failureDomain: host
+      replicated:
+        size: 3
+    dataPool:
+      failureDomain: host
+      replicated:
+        size: 3
+    preservePoolsOnDelete: false
+    gateway:
+      port: 80
+      instances: 2
+      resources:
+        limits:
+          memory: 1Gi
+        requests:
+          cpu: 200m
+          memory: 256Mi
+  storageClass:
+    enabled: true
+    name: ceph-bucket
+    reclaimPolicy: Delete
+
+# The chart's snapshot classes are off by default; leave them off.
+cephBlockPoolsVolumeSnapshotClass:
+  enabled: false
+cephFileSystemVolumeSnapshotClass:
+  enabled: false
+

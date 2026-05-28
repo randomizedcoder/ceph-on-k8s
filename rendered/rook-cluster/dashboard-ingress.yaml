@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ceph-dashboard
+  namespace: rook-ceph
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  ingressClassName: cilium
+  tls:
+  - hosts:
+    - ceph.lab.local
+    secretName: ceph-dashboard-tls
+  rules:
+  - host: ceph.lab.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: rook-ceph-mgr-dashboard
+            port:
+              number: 7000
+

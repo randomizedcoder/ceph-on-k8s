@@ -1,0 +1,45 @@
+# RBD block volume (RWO)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ceph-block-test
+  namespace: ceph-demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  storageClassName: ceph-block
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+# CephFS shared filesystem (RWX)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ceph-fs-test
+  namespace: ceph-demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  storageClassName: ceph-filesystem
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 1Gi
+---
+# S3 bucket via ObjectBucketClaim — Rook's bucket-provisioner
+# creates a bucket in RGW and emits a Secret + ConfigMap with
+# the same name as the OBC, holding the access key/secret
+# (Secret) and the bucket host/port/name (ConfigMap).
+apiVersion: objectbucket.io/v1alpha1
+kind: ObjectBucketClaim
+metadata:
+  name: ceph-s3-test
+  namespace: ceph-demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  storageClassName: ceph-bucket
+  generateBucketName: ceph-demo
+
