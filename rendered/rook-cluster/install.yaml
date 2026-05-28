@@ -77,6 +77,7 @@ spec:
         app: rook-ceph-tools
     spec:
       dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
       containers:
         - name: rook-ceph-tools
           image: quay.io/ceph/ceph:v19.2.3
@@ -295,6 +296,7 @@ spec:
       encryption:
         enabled: false
       requireMsgr2: false
+    provider: host
   placement:
     all:
       tolerations:

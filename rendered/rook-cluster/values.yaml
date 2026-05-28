@@ -34,6 +34,19 @@
         # dashboard itself stays plaintext on its ClusterIP.
         ssl: false
 
+      # ─── Network: hostNetwork ────────────────────────────────────
+      # MONs (and all other daemons) run in the host network namespace
+      # so each MON daemon binds to and advertises the node's actual
+      # IP (10.33.33.10/11/12) on ports 6789 (msgr-v1) + 3300 (msgr2).
+      # This is the standard Rook pattern for external clients: kernel
+      # CephFS clients verify that the address they connected to
+      # matches the address the MON advertised in the MON map. With
+      # regular pod networking, MONs advertise their pod IP (10.x.x.x)
+      # and external clients hitting a LoadBalancer VIP get rejected
+      # with "wrong peer at address". hostNetwork bypasses that.
+      network:
+        provider: host
+
       # ─── Storage ─────────────────────────────────────────────────
       # Direct device discovery: Rook's OSD prepare job for each
       # node picks up the disk under the by-id path the microvm

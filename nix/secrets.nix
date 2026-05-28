@@ -61,14 +61,12 @@ let
     then lib.trim (builtins.readFile cephSecretFile)
     else null;
 
-  # /etc/ceph/ceph.conf for the external client. The MON VIPs are
-  # deterministic constants — no fsid is needed (the kernel client
-  # gets it from the MON map at connect time). Built in-Nix as a
-  # store path so microvm-client.nix can mount it via activation.
+  # /etc/ceph/ceph.conf for the external client. MONs run on
+  # hostNetwork so they advertise the node IPs directly — the list
+  # is constants.ceph.monHosts (cp0/cp1/cp2 on port 6789).
   cephConf = pkgs.writeText "ceph.conf" ''
     [global]
-    mon_host = ${constants.ceph.mon.a.vip}:3300,${constants.ceph.mon.b.vip}:3300,${constants.ceph.mon.c.vip}:3300
-    ms_mode = prefer-crc
+    mon_host = ${lib.concatStringsSep "," constants.ceph.monHosts}
   '';
 in
 {

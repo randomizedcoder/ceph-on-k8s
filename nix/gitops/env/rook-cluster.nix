@@ -79,6 +79,19 @@ let
         # dashboard itself stays plaintext on its ClusterIP.
         ssl: false
 
+      # ─── Network: hostNetwork ────────────────────────────────────
+      # MONs (and all other daemons) run in the host network namespace
+      # so each MON daemon binds to and advertises the node's actual
+      # IP (10.33.33.10/11/12) on ports 6789 (msgr-v1) + 3300 (msgr2).
+      # This is the standard Rook pattern for external clients: kernel
+      # CephFS clients verify that the address they connected to
+      # matches the address the MON advertised in the MON map. With
+      # regular pod networking, MONs advertise their pod IP (10.x.x.x)
+      # and external clients hitting a LoadBalancer VIP get rejected
+      # with "wrong peer at address". hostNetwork bypasses that.
+      network:
+        provider: host
+
       # ─── Storage ─────────────────────────────────────────────────
       # Direct device discovery: Rook's OSD prepare job for each
       # node picks up the disk under the by-id path the microvm
@@ -278,74 +291,11 @@ ${perNodeDevicesYaml}
     values      = clusterValuesYaml;
   };
 
-  # ─── MON LoadBalancer Services (for external CephFS clients) ─────
-  # Three Services, one per MON pod (rook labels each MON pod with
-  # `ceph_daemon_id=a|b|c`). Each Service sits on a dedicated VIP via
-  # cilium's lbipam annotation. The matching L2 announcement policy
-  # ARP-broadcasts the VIPs on the lab bridge.
-  #
-  # Without these, the MONs only have ClusterIPs and clients outside
-  # the cluster (like the client0 microvm) can't reach them.
-  mkMonLbService = mon: {
-    name = "rook-cluster/mon-${mon}-service.yaml";
-    content = ''
-      apiVersion: v1
-      kind: Service
-      metadata:
-        name: rook-ceph-mon-${mon}-lb
-        namespace: ${constants.ceph.namespace}
-        # Labels here (not just pod selector below) are what the
-        # CiliumL2AnnouncementPolicy `serviceSelector` matches against.
-        labels:
-          app: rook-ceph-mon
-          ceph_daemon_id: ${mon}
-        annotations:
-          argocd.argoproj.io/sync-wave: "1"
-          lbipam.cilium.io/ips: "${constants.ceph.mon.${mon}.vip}"
-      spec:
-        type: LoadBalancer
-        # externalTrafficPolicy: Cluster (the default) — Cilium picks
-        # an L2-announce node independently of MON pod placement; with
-        # `Local` the announce-node and the pod-node have to coincide
-        # or traffic gets dropped, and Cilium's lease holder isn't
-        # constrained to do that.
-        externalTrafficPolicy: Cluster
-        selector:
-          app: rook-ceph-mon
-          mon_cluster: ${constants.ceph.namespace}
-          ceph_daemon_id: ${mon}
-        ports:
-        - { name: msgr2,   port: 3300, targetPort: 3300, protocol: TCP }
-        - { name: msgr-v1, port: 6789, targetPort: 6789, protocol: TCP }
-    '';
-  };
-
-  monLbManifests = builtins.map mkMonLbService [ "a" "b" "c" ];
-
-  monL2PolicyManifest = {
-    name = "rook-cluster/mon-l2-announcement-policy.yaml";
-    content = ''
-      # ARP-announce the MON LB VIPs on the lab bridge. Selects every
-      # Service whose pods carry `app=rook-ceph-mon` (which is the
-      # three -lb Services above plus the chart's internal ClusterIP
-      # mons; loadBalancerIPs filtering means only LB-typed Services
-      # actually get a VIP announced).
-      apiVersion: cilium.io/v2alpha1
-      kind: CiliumL2AnnouncementPolicy
-      metadata:
-        name: lab-l2-rook
-        annotations:
-          argocd.argoproj.io/sync-wave: "1"
-      spec:
-        serviceSelector:
-          matchExpressions:
-          - { key: app, operator: In, values: [ rook-ceph-mon ] }
-        interfaces:
-        - ${constants.cilium.ingress.nic}
-        externalIPs: true
-        loadBalancerIPs: true
-    '';
-  };
+  # MON LoadBalancer Services + L2 announce policy were removed when
+  # we switched to hostNetwork mode (`cephClusterSpec.network.provider
+  # = host` above). External clients now talk directly to the node IPs
+  # — see constants.ceph.monHosts and the client's /etc/ceph/ceph.conf
+  # generated in nix/secrets.nix.
 in
 {
   manifests = [
@@ -490,5 +440,5 @@ in
             - /status
       '';
     }
-  ] ++ monLbManifests ++ [ monL2PolicyManifest ];
+  ];
 }

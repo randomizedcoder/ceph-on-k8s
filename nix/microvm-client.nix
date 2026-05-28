@@ -40,11 +40,12 @@ let
 
   cu = constants.ceph.externalClient;
 
-  # mon_host string for /etc/ceph/ceph.conf and `mount.ceph` — built
-  # from constants so the client agrees with the LB Service VIPs in
-  # nix/gitops/env/rook-cluster.nix.
-  monAddrs = lib.concatMapStringsSep "," (m: "${m.vip}:3300")
-    (with constants.ceph.mon; [ a b c ]);
+  # CephFS mount device string. MONs run on hostNetwork (see the
+  # constants.ceph comment) so we point straight at the node IPs on
+  # port 6789 (msgr-v1, the kernel client default). Trailing `:/`
+  # asks for the root of the filesystem; the `fs=` (mds_namespace=)
+  # option selects which CephFS.
+  monMountTarget = lib.concatStringsSep "," constants.ceph.monHosts + ":/";
 
   vmConfig = nixpkgs.lib.nixosSystem {
     inherit system;
@@ -153,10 +154,10 @@ let
         # eval time), so no `mount.ceph` helper is needed. nixpkgs'
         # `ceph` / `ceph-client` packages currently pull in a Python
         # tree that conflicts with the active Sphinx version, so we
-        # avoid them entirely. util-linux gives us `findmnt` + the
-        # standard `mount`/`umount` for debugging.
+        # avoid them entirely.
         environment.systemPackages = with pkgs; [
-          util-linux
+          util-linux  # findmnt, mount/umount
+          bonnie      # bonnie++ — disk-I/O benchmark for /mnt/cephfs
         ];
 
         # ─── SSH host key activation (same as nix/microvm.nix) ─────────
@@ -197,7 +198,7 @@ let
         # broken `ceph` package). Mount is best-effort at boot
         # (`nofail`) so SSH still comes up if the MONs are unreachable.
         fileSystems.${cu.mountDir} = lib.mkIf (cephClientSecret != null) {
-          device = "${monAddrs}:/";
+          device = monMountTarget;
           fsType = "ceph";
           options = [
             "name=${cu.user}"
@@ -205,7 +206,6 @@ let
             # Newer kernel CephFS clients use mds_namespace= (the
             # older `fs=` is rejected with "Unknown parameter 'fs'").
             "mds_namespace=${cu.fsName}"
-            "ms_mode=prefer-crc"
             "noatime"
             "_netdev"
             "x-systemd.requires=network-online.target"

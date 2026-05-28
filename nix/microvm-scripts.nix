@@ -366,6 +366,7 @@ in
       echo ""
       echo "=== Removing client data images ==="
       REMOVED=0
+      # shellcheck disable=SC2043  # single-element loop today; multi-client ready
       for node in ${builtins.concatStringsSep " " constants.clientNodeNames}; do
         img="k8s-$node-data.img"
         if [ -f "$img" ]; then
