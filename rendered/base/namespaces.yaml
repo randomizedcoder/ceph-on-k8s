@@ -16,11 +16,6 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: openebs
----
-apiVersion: v1
-kind: Namespace
-metadata:
   name: rook-ceph
 ---
 apiVersion: v1

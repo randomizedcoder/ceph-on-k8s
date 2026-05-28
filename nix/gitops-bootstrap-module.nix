@@ -139,28 +139,6 @@ in
           }
         fi
 
-        # ── 1c. OpenEBS Local PV Device ────────────────────────────────
-        # Applies the upstream device-operator.yaml and our StorageClass.
-        # The node DaemonSet auto-discovers the GPT partition that
-        # nix/k8s-module.nix's ceph-disk-init prepared earlier in the
-        # boot sequence.
-        if [ -f ${cfg.manifestsPath}/openebs-device/upstream.yaml ]; then
-          apply_file ${cfg.manifestsPath}/openebs-device/upstream.yaml
-          log "waiting for openebs-device controller"
-          kubectl -n ${constants.openebs.namespace} rollout status \
-            statefulset/openebs-device-controller --timeout=180s || {
-              log "WARN: openebs-device-controller rollout not complete; continuing"
-            }
-          log "waiting for openebs-device node agent"
-          kubectl -n ${constants.openebs.namespace} rollout status \
-            ds/openebs-device-node --timeout=180s || {
-              log "WARN: openebs-device-node rollout not complete; continuing"
-            }
-        fi
-        if [ -f ${cfg.manifestsPath}/openebs-device/storageclass.yaml ]; then
-          apply_file ${cfg.manifestsPath}/openebs-device/storageclass.yaml
-        fi
-
         # ── 1d. Rook-Ceph operator ─────────────────────────────────────
         # Operator + CSI plugins. Must land before the CephCluster CR
         # (task #6) because that CR depends on the cephclusters CRD
@@ -182,6 +160,21 @@ in
               log "WARN: Rook CRDs not all Established; continuing"
             }
         fi
+
+        # ── 1d2. Label control-plane nodes ─────────────────────────────
+        # Rook's placement.mon nodeAffinity requires
+        # node-role.kubernetes.io/control-plane=true. kubelet's
+        # `--register-with-labels` can't set kubernetes.io/* labels
+        # (blocked by NodeRestriction admission), so we label them
+        # externally here using the cp0 admin kubeconfig. Idempotent
+        # (--overwrite). Same label is also useful for the
+        # rook-ceph-detect-version job which inherits placement.mon.
+        log "labeling control-plane nodes"
+        for n in cp0 cp1 cp2; do
+          kubectl label node "k8s-$n" \
+            node-role.kubernetes.io/control-plane=true \
+            --overwrite || log "  WARN: failed to label k8s-$n"
+        done
 
         # ── 1e. CephCluster CR + pools + filesystem + object store ─────
         # The CR triggers operator-driven creation of MONs, MGRs, OSDs,

@@ -198,40 +198,28 @@ rec {
     hash = "sha256-HVHN7NRC8fX4l4Pp4BabldNyck2iA8x13XpcTlChDOY=";
   };
 
-  # ─── OpenEBS Local PV Device (static installer) ───────────────────
-  # device-localpv has no Helm chart. We apply the upstream
-  # `device-operator.yaml` directly (same shape as cert-manager above)
-  # and ship our own StorageClass alongside.
-  #
-  # The driver matches devices by GPT partition label set in the
-  # StorageClass `parameters.devname`. A NixOS oneshot
-  # (`ceph-disk-init` in k8s-module.nix) pre-partitions
-  # /dev/disk/by-id/virtio-ceph-osd-* on first boot, labeling the
-  # single partition `ceph-osd`, so the agent auto-discovers it.
-  openebsDeviceLocalpv = {
-    version = "v0.9.0";
-    url  = "https://raw.githubusercontent.com/openebs/device-localpv/v0.9.0/deploy/device-operator.yaml";
-    hash = "sha256-+/9Leu4L7J3AK1+yEXlON54nNDloA1zjkm9WBwRLppM=";
-  };
-
-  # ─── Ceph cluster wiring (filled in by later tasks #5–#7) ──────────
+  # ─── Ceph cluster wiring ──────────────────────────────────────────
+  # OSD storage backing: Rook consumes the raw 10 GiB disk on each
+  # node directly via `storage.nodes[].devices` in the CephCluster CR.
+  # We tried OpenEBS device-localpv first, but the project is
+  # archived and its v0.9.0 agent requires a non-trivial
+  # meta-partition scheme that's poorly documented. Direct device
+  # discovery is the canonical Rook pattern and works without an
+  # intermediate CSI layer; the `ceph-disk-init` oneshot in
+  # k8s-module.nix just wipes any filesystem header so Rook's
+  # `ceph-volume` can take the disk fresh.
   ceph = {
     namespace = "rook-ceph";
     osd = {
       diskSizeGi    = 10;          # per-node raw disk (lab-only; bump for real use)
       perNodeCount  = 1;
       sizeGiPerOsd  = 10;
-      partLabel     = "ceph-osd";  # GPT partition label; matches openebs.diskPartLabel
+      # By-id path that Rook's CephCluster `nodes[].devices` references;
+      # the virtio-blk serial we set in microvm.nix produces this name.
+      devicePath = "/dev/disk/by-id/virtio-ceph-osd-";  # suffix per-host hostname
     };
     dashboard = { host = "ceph.lab.local"; vip = "10.33.33.53"; };
     rgw       = { host = "s3.lab.local";   vip = "10.33.33.54"; };
-  };
-
-  # ─── OpenEBS wiring ─────────────────────────────────────────────────
-  openebs = {
-    namespace        = "openebs";                # matches upstream device-operator.yaml
-    storageClassName = "openebs-device";
-    diskPartLabel    = "ceph-osd";               # GPT partition label the SC matches
   };
 
   # ─── ArgoCD service (NodePort reachable from host) ─────────────────

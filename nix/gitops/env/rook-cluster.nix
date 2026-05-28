@@ -25,6 +25,23 @@
 let
   constants = import ../../constants.nix;
 
+  # Per-node `devices` entry for the CephCluster CR. The disk is
+  # exposed as /dev/disk/by-id/virtio-ceph-osd-<hostname> by the
+  # virtio-blk `serial=` set in nix/microvm.nix.
+  #
+  # Built with explicit indentation because Nix '' '' strings strip
+  # common leading whitespace and would otherwise produce zero-indent
+  # lines that break the rendered values.yaml's YAML structure.
+  perNodeDevicesYaml = let
+    indent = "        ";  # 8 spaces — under cephClusterSpec.storage.nodes
+  in lib.concatMapStrings (n: let
+    hostname = constants.getHostname n;
+  in
+    "${indent}- name: ${hostname}\n" +
+    "${indent}  devices:\n" +
+    "${indent}  - name: \"${constants.ceph.osd.devicePath}${hostname}\"\n"
+  ) constants.nodeNames;
+
   clusterValuesYaml = ''
     # operatorNamespace must match the rook-operator chart's namespace.
     operatorNamespace: ${constants.ceph.namespace}
@@ -38,8 +55,10 @@ let
         operator: "Exists"
         effect: "NoSchedule"
 
+    # See rook-operator.nix for the reason monitoring is off — same
+    # ServiceMonitor CRD missing on this cluster.
     monitoring:
-      enabled: true
+      enabled: false
       createPrometheusRules: false
 
     cephClusterSpec:
@@ -61,55 +80,15 @@ let
         ssl: false
 
       # ─── Storage ─────────────────────────────────────────────────
-      # PVC-based OSDs: one per node, claimed from the openebs-device
-      # StorageClass. The CSI provisioner binds each PVC to the GPT
-      # partition labeled `ceph-osd` on the node where the OSD pod
-      # schedules (volumeBindingMode=WaitForFirstConsumer on the SC).
+      # Direct device discovery: Rook's OSD prepare job for each
+      # node picks up the disk under the by-id path the microvm
+      # gives it, runs `ceph-volume raw prepare --bluestore`, and
+      # launches an OSD daemon. No CSI / StorageClass involved.
       storage:
         useAllNodes: false
         useAllDevices: false
-        storageClassDeviceSets:
-        - name: ceph-osd-set
-          count: ${toString (builtins.length constants.nodeNames)}
-          portable: false
-          tuneDeviceClass: true
-          tuneFastDeviceClass: false
-          encrypted: false
-          placement:
-            tolerations:
-            - key: "node-role.kubernetes.io/control-plane"
-              operator: "Exists"
-              effect: "NoSchedule"
-            topologySpreadConstraints:
-            - maxSkew: 1
-              topologyKey: kubernetes.io/hostname
-              whenUnsatisfiable: DoNotSchedule
-              labelSelector:
-                matchExpressions:
-                - key: app
-                  operator: In
-                  values: [rook-ceph-osd, rook-ceph-osd-prepare]
-          preparePlacement:
-            tolerations:
-            - key: "node-role.kubernetes.io/control-plane"
-              operator: "Exists"
-              effect: "NoSchedule"
-          resources:
-            limits:
-              memory: 1Gi
-            requests:
-              cpu: 200m
-              memory: 512Mi
-          volumeClaimTemplates:
-          - metadata:
-              name: data
-            spec:
-              storageClassName: ${constants.openebs.storageClassName}
-              accessModes: [ReadWriteOnce]
-              volumeMode: Block
-              resources:
-                requests:
-                  storage: ${toString constants.ceph.osd.sizeGiPerOsd}Gi
+        nodes:
+${perNodeDevicesYaml}
 
       # ─── Placement ────────────────────────────────────────────────
       # MONs prefer control planes (etcd/apiserver-bearing nodes).
@@ -167,11 +146,16 @@ let
             cpu: 100m
             memory: 512Mi
         osd:
+          # 2Gi minimum because parse_env computes osd_memory_target as
+          # POD_MEMORY_LIMIT * osd_memory_target_cgroup_limit_ratio
+          # (default 0.8) and asserts if the result is below the
+          # osd_memory_target floor (~939 MB). 1Gi limit → 819 MB target
+          # → crash at config init. 2Gi → 1.6 GB target → OK.
           limits:
-            memory: 1Gi
+            memory: 2Gi
           requests:
             cpu: 200m
-            memory: 512Mi
+            memory: 1Gi
         prepareosd:
           limits:
             memory: 512Mi
@@ -198,10 +182,20 @@ let
         isDefault: true
         reclaimPolicy: Delete
         allowVolumeExpansion: true
+        # The chart's templates/cephblockpool.yaml does NOT add CSI
+        # secret references — the example values.yaml expects users to
+        # include them in `parameters`. Without them, dynamic
+        # provisioning fails with "provided secret is empty".
         parameters:
           imageFormat: "2"
           imageFeatures: layering
           csi.storage.k8s.io/fstype: ext4
+          csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+          csi.storage.k8s.io/provisioner-secret-namespace: ${constants.ceph.namespace}
+          csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+          csi.storage.k8s.io/controller-expand-secret-namespace: ${constants.ceph.namespace}
+          csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+          csi.storage.k8s.io/node-stage-secret-namespace: ${constants.ceph.namespace}
 
     # ─── Shared filesystem (CephFS, RWX) ───────────────────────────
     cephFileSystems:
@@ -232,6 +226,12 @@ let
         allowVolumeExpansion: true
         parameters:
           csi.storage.k8s.io/fstype: ext4
+          csi.storage.k8s.io/provisioner-secret-name: rook-csi-cephfs-provisioner
+          csi.storage.k8s.io/provisioner-secret-namespace: ${constants.ceph.namespace}
+          csi.storage.k8s.io/controller-expand-secret-name: rook-csi-cephfs-provisioner
+          csi.storage.k8s.io/controller-expand-secret-namespace: ${constants.ceph.namespace}
+          csi.storage.k8s.io/node-stage-secret-name: rook-csi-cephfs-node
+          csi.storage.k8s.io/node-stage-secret-namespace: ${constants.ceph.namespace}
 
     # ─── Object store (RGW, S3) ────────────────────────────────────
     # Chart default uses erasure coding for the data pool (2+1).

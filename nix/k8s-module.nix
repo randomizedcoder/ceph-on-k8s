@@ -163,71 +163,59 @@ in
       util-linux
       openssl
       etcd       # for etcdctl
-      gptfdisk   # sgdisk — used by ceph-disk-init below
       e2fsprogs  # wipefs — used by ceph-disk-init below
     ];
 
-    # ─── ceph-disk-init: pre-partition the Ceph OSD disk ─────────────
-    # The OpenEBS device-localpv driver discovers candidate OSD disks
-    # by GPT partition label. The microvm declared the raw disk at
-    # /dev/disk/by-id/virtio-ceph-osd-${hostname} with `autoCreate=true`,
-    # which writes an ext4 header. This oneshot wipes that header and
-    # creates a single GPT partition labeled `${diskPartLabel}` so the
-    # OpenEBS device-node agent can claim it.
-    #
-    # Idempotent: if the disk already has the right partition label,
-    # the unit is a no-op. The agent's continuous scan picks up the
-    # new partition without restart.
+    # ─── ceph-disk-init: zap the Ceph OSD disk ───────────────────────
+    # The microvm volume's `autoCreate=true` writes an ext4 header on
+    # /dev/disk/by-id/virtio-ceph-osd-<host>. Rook's `ceph-volume raw
+    # prepare` refuses to consume a disk with an existing filesystem,
+    # so this oneshot wipes the header on first boot before kubelet
+    # comes up. Idempotent: re-running on a disk Rook has already
+    # turned into a Bluestore OSD is a no-op (wipefs --no-act would
+    # detect ceph_bluestore signature, but we run unconditionally
+    # because Rook's later detection beats us if needed; if Rook has
+    # already initialised the disk, wipefs sees no recognised header
+    # and exits 0).
     systemd.services.ceph-disk-init = {
-      description = "Pre-partition the Ceph OSD disk for OpenEBS device-localpv";
+      description = "Zap the Ceph OSD disk header (so Rook can consume it fresh)";
       wantedBy = [ "multi-user.target" ];
-      # Run before kubelet so the partition exists before Rook tries
-      # to consume any PVC bound to this disk. Order against
-      # containerd is good enough — kubelet starts after containerd.
+      # Run before kubelet so the disk is clean before Rook's OSD
+      # prepare job ever schedules.
       before = [ "containerd.service" "kubelet.service" ];
       after = [ "local-fs.target" ];
-      path = with pkgs; [ gptfdisk e2fsprogs util-linux coreutils gawk gnugrep ];
+      path = with pkgs; [ util-linux e2fsprogs coreutils gnugrep ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        TimeoutStartSec = "60s";
+        TimeoutStartSec = "30s";
       };
-      script = let
-        label = constants.openebs.diskPartLabel;
-      in ''
+      script = ''
         set -eu
 
         log() { echo "[ceph-disk-init] $*"; }
 
-        # Resolve the disk by its virtio serial. We can't bake the
-        # hostname into the path at Nix eval time because the same
-        # nixosSystem is shared across nodes — so we glob.
+        # Resolve the disk by its virtio serial. The same nixosSystem
+        # is shared across nodes, so we glob instead of baking the
+        # hostname in at Nix eval time.
         DISK="$(ls /dev/disk/by-id/virtio-ceph-osd-* 2>/dev/null | head -n1 || true)"
         if [ -z "$DISK" ]; then
-          log "no /dev/disk/by-id/virtio-ceph-osd-* found — skipping (probably the data-only worker case)"
+          log "no /dev/disk/by-id/virtio-ceph-osd-* found — skipping"
           exit 0
         fi
         log "found Ceph disk: $DISK"
 
-        # If a partition with the right label already exists, we're done.
-        if sgdisk -p "$DISK" 2>/dev/null | grep -qE "^[[:space:]]+1[[:space:]].*${label}"; then
-          log "partition labeled '${label}' already present on $DISK — nothing to do"
+        # If wipefs reports no known signature, the disk is either
+        # already Bluestore-formatted by Rook (no fs signature) or
+        # genuinely blank. Either way, nothing to do.
+        if ! wipefs --no-act "$DISK" | grep -q .; then
+          log "no filesystem header on $DISK — nothing to wipe"
           exit 0
         fi
 
-        log "wiping any existing filesystem header from $DISK"
+        log "wiping filesystem header from $DISK"
         wipefs -af "$DISK"
-
-        log "creating single GPT partition labeled '${label}' on $DISK"
-        # -n 1:0:0  — partition 1, default start, default end (whole disk)
-        # -t 1:8e00 — Linux LVM type code (acceptable for the OpenEBS device agent)
-        # -c 1:LABEL — set partition name (used as the GPT label)
-        sgdisk -n 1:0:0 -t 1:8e00 -c "1:${label}" "$DISK"
-
-        # Inform the kernel of the new partition table.
-        partprobe "$DISK" || blockdev --rereadpt "$DISK" || true
-
-        log "done — partition 1 on $DISK is labeled '${label}'"
+        log "done"
       '';
     };
 

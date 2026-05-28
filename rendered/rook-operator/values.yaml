@@ -9,11 +9,13 @@ csi:
   enableNFSDriver: false
   provisionerReplicas: 2
 
-# Monitoring scaffolding (Prometheus CR + ServiceMonitor). The
-# CRs are no-ops until Prometheus operator is in the cluster;
-# cheap to ship.
+# Monitoring (ServiceMonitor + PrometheusRule). DISABLED because
+# prometheus-operator isn't in the cluster — with monitoring.enabled=true
+# the operator hot-loops failing to create ServiceMonitor CRs
+# against a missing CRD, starving the OSD prepare path.
+# Re-enable after deploying prometheus-operator.
 monitoring:
-  enabled: true
+  enabled: false
 
 # Operator resource requests sized for the lab (CP nodes are
 # 10 GiB / 4 vCPU per constants.nix vm).

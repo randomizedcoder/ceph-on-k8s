@@ -28,11 +28,16 @@ let
   etcdSans = [ "localhost" "127.0.0.1" "::1" ] ++ allIps4 ++ allIps6;
 
   # ─── Build-time PKI derivation ──────────────────────────────────────
-  # Generates ALL certs as a Nix store path. Deterministic (fixed seed not
-  # needed — certs are regenerated on any input change via content hash).
-  # Cert validity: 30 days for leaf certs, 10 years for CAs.
-  # step-cli defaults to 24h which is too short for a dev cluster.
-  leafNotAfter = "720h";   # 30 days
+  # Generates ALL certs as a Nix store path. Cert validity is wall-clock
+  # relative to BUILD TIME (step-cli stamps the cert when it runs), so
+  # a short leaf-cert window means the cluster goes dead N days after
+  # the first build unless `nix run .#k8s-cluster-rebuild` forces a
+  # fresh derivation eval and re-bakes.
+  #
+  # The source repo (nix-k8s-examples) used 720h (30 days), which is
+  # too aggressive for a lab — bumped to 1 year here so a cluster
+  # built today still boots in three months.
+  leafNotAfter = "8760h";  # 1 year
   caNotAfter = "87600h";   # 10 years
 
   pkiStore = pkgs.runCommand "k8s-pki" {

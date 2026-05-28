@@ -29,11 +29,6 @@ in
         apiVersion: v1
         kind: Namespace
         metadata:
-          name: ${constants.openebs.namespace}
-        ---
-        apiVersion: v1
-        kind: Namespace
-        metadata:
           name: ${constants.ceph.namespace}
         ---
         apiVersion: v1

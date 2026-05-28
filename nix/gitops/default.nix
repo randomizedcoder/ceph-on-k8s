@@ -21,7 +21,6 @@ let
   argocd        = import (envDir + "/argocd.nix")         { inherit pkgs lib helm; };
   cilium        = import (envDir + "/cilium.nix")         { inherit pkgs lib helm; };
   certManager   = import (envDir + "/cert-manager.nix")   { inherit pkgs lib; };
-  openebsDevice = import (envDir + "/openebs-device.nix") { inherit pkgs lib; };
   rookOperator  = import (envDir + "/rook-operator.nix")  { inherit pkgs lib helm; };
   rookCluster   = import (envDir + "/rook-cluster.nix")   { inherit pkgs lib helm; };
   cephDemo      = import (envDir + "/ceph-demo.nix")      { inherit pkgs lib; };
@@ -31,7 +30,6 @@ let
     ++ argocd.manifests
     ++ cilium.manifests
     ++ certManager.manifests
-    ++ openebsDevice.manifests
     ++ rookOperator.manifests
     ++ rookCluster.manifests
     ++ cephDemo.manifests;
