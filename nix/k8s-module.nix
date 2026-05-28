@@ -96,8 +96,9 @@ in
   };
 
   config = mkIf cfg.enable {
-    # ─── Required kernel modules for K8s + Cilium ─────────────────────
+    # ─── Required kernel modules for K8s + Cilium + Rook-Ceph ────────
     boot.kernelModules = [
+      # K8s + Cilium
       "br_netfilter"
       "overlay"
       "ip_vs"
@@ -105,6 +106,16 @@ in
       "ip_vs_wrr"
       "ip_vs_sh"
       "nf_conntrack"
+      # Rook-Ceph host clients. Rook's RBD CSI mounts kernel-mode
+      # RBD volumes inside pods via the host's `rbd` module. CephFS
+      # CSI mounts via the host's `ceph` module. `nbd` is the
+      # rbd-nbd fallback. `dm_thin_pool` supports RBD imageFeatures
+      # like `layering`/`exclusive-lock` that Rook's default
+      # StorageClass enables.
+      "rbd"
+      "ceph"
+      "nbd"
+      "dm_thin_pool"
     ];
 
     boot.kernel.sysctl = {

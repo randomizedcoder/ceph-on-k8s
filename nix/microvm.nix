@@ -63,11 +63,35 @@ let
             proto = "9p";
           }];
 
-          volumes = [{
-            image = "${hostname}-data.img";
-            mountPoint = "/var/lib";
-            size = 20480;  # 20GB writable volume for containerd, etcd, kubelet
-          }];
+          volumes = [
+            {
+              image = "${hostname}-data.img";
+              mountPoint = "/var/lib";
+              size = 20480;  # 20GB writable volume for containerd, etcd, kubelet
+            }
+            {
+              # Raw OSD disk for Ceph. mountPoint=null → microvm.nix's
+              # mounts.nix skips registering a filesystem (it gates on
+              # mountPoint != null), so the guest kernel sees /dev/vdb
+              # as untouched raw block — exactly what OpenEBS NDM wants.
+              # The ext4 header that autoCreate=true writes gets wiped
+              # by Rook's `ceph-volume` OSD prepare on first use.
+              # 10 GiB is below Bluestore's recommended minimum but
+              # sufficient to prove the configuration end-to-end with
+              # the small ceph-demo workload. Bump via
+              # constants.ceph.osd.diskSizeGi for real use.
+              image = "${hostname}-ceph.img";
+              mountPoint = null;
+              size = 10240;  # 10 GiB
+              autoCreate = true;
+              fsType = "ext4";
+              # Stable identity in the guest via /dev/disk/by-id/virtio-ceph-osd-*.
+              # The CephCluster CR references this path rather than
+              # /dev/vdb so volume-order changes can't bind the OSD to
+              # the wrong physical disk.
+              serial = "ceph-osd-${hostname}";
+            }
+          ];
 
           interfaces = [{
             type = "tap";

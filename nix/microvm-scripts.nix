@@ -205,22 +205,24 @@ in
       fi
 
       echo ""
-      echo "=== Removing per-VM data images (etcd / containerd / kubelet state) ==="
+      echo "=== Removing per-VM data + ceph images ==="
       REMOVED=0
       for node in ${builtins.concatStringsSep " " constants.nodeNames}; do
-        img="k8s-$node-data.img"
-        if [ -f "$img" ]; then
-          rm -f "$img"
-          echo "  removed $img"
-          REMOVED=$((REMOVED + 1))
-        fi
+        for suffix in data ceph; do
+          img="k8s-$node-$suffix.img"
+          if [ -f "$img" ]; then
+            rm -f "$img"
+            echo "  removed $img"
+            REMOVED=$((REMOVED + 1))
+          fi
+        done
       done
 
       echo ""
       if [ "$REMOVED" -eq 0 ]; then
-        echo "No data images found. Nothing to wipe."
+        echo "No images found. Nothing to wipe."
       else
-        echo "Wiped $REMOVED data image(s)."
+        echo "Wiped $REMOVED image(s)."
       fi
     '';
   };
