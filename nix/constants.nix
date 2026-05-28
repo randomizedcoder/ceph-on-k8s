@@ -179,8 +179,16 @@ rec {
       url     = "https://github.com/argoproj/argo-helm/releases/download/argo-cd-9.5.11/argo-cd-9.5.11.tgz";
       hash    = "sha256-TyvlRDv3PifSR0mcO/un/24CJo2UzIBHeu8j4a6osB8=";
     };
-    # rookCephOperator — added in a later task (#5)
-    # rookCephCluster  — added in a later task (#6)
+    rookCephOperator = {
+      version = "v1.19.6";
+      url     = "https://charts.rook.io/release/rook-ceph-v1.19.6.tgz";
+      hash    = "sha256-NKNNRI1L5XmY2BF/6eWQh0n2/pqmxsYYRLv7hdz6LWs=";
+    };
+    rookCephCluster = {
+      version = "v1.19.6";
+      url     = "https://charts.rook.io/release/rook-ceph-cluster-v1.19.6.tgz";
+      hash    = "sha256-KKBF8HG+GQGWWH5PWugYC/0nvxl0tpmMGUZPpTvp1Vk=";
+    };
   };
 
   # ─── cert-manager (static installer) ───────────────────────────────

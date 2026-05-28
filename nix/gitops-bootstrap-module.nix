@@ -161,6 +161,28 @@ in
           apply_file ${cfg.manifestsPath}/openebs-device/storageclass.yaml
         fi
 
+        # ── 1d. Rook-Ceph operator ─────────────────────────────────────
+        # Operator + CSI plugins. Must land before the CephCluster CR
+        # (task #6) because that CR depends on the cephclusters CRD
+        # the chart ships.
+        if [ -f ${cfg.manifestsPath}/rook-operator/install.yaml ]; then
+          apply_file ${cfg.manifestsPath}/rook-operator/install.yaml
+          log "waiting for rook-ceph-operator Deployment"
+          kubectl -n ${constants.ceph.namespace} rollout status \
+            deploy/rook-ceph-operator --timeout=300s || {
+              log "WARN: rook-ceph-operator rollout not complete; continuing"
+            }
+          log "waiting for Rook CRDs"
+          kubectl wait --for=condition=Established \
+            crd/cephclusters.ceph.rook.io \
+            crd/cephblockpools.ceph.rook.io \
+            crd/cephfilesystems.ceph.rook.io \
+            crd/cephobjectstores.ceph.rook.io \
+            --timeout=120s || {
+              log "WARN: Rook CRDs not all Established; continuing"
+            }
+        fi
+
         # ── 2. ArgoCD ──────────────────────────────────────────────────
         if [ -f ${cfg.manifestsPath}/argocd/install.yaml ]; then
 
