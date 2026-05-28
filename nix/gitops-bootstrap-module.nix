@@ -139,6 +139,28 @@ in
           }
         fi
 
+        # ── 1c. OpenEBS Local PV Device ────────────────────────────────
+        # Applies the upstream device-operator.yaml and our StorageClass.
+        # The node DaemonSet auto-discovers the GPT partition that
+        # nix/k8s-module.nix's ceph-disk-init prepared earlier in the
+        # boot sequence.
+        if [ -f ${cfg.manifestsPath}/openebs-device/upstream.yaml ]; then
+          apply_file ${cfg.manifestsPath}/openebs-device/upstream.yaml
+          log "waiting for openebs-device controller"
+          kubectl -n ${constants.openebs.namespace} rollout status \
+            statefulset/openebs-device-controller --timeout=180s || {
+              log "WARN: openebs-device-controller rollout not complete; continuing"
+            }
+          log "waiting for openebs-device node agent"
+          kubectl -n ${constants.openebs.namespace} rollout status \
+            ds/openebs-device-node --timeout=180s || {
+              log "WARN: openebs-device-node rollout not complete; continuing"
+            }
+        fi
+        if [ -f ${cfg.manifestsPath}/openebs-device/storageclass.yaml ]; then
+          apply_file ${cfg.manifestsPath}/openebs-device/storageclass.yaml
+        fi
+
         # ── 2. ArgoCD ──────────────────────────────────────────────────
         if [ -f ${cfg.manifestsPath}/argocd/install.yaml ]; then
 

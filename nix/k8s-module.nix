@@ -162,8 +162,74 @@ in
       ethtool
       util-linux
       openssl
-      etcd  # for etcdctl
+      etcd       # for etcdctl
+      gptfdisk   # sgdisk — used by ceph-disk-init below
+      e2fsprogs  # wipefs — used by ceph-disk-init below
     ];
+
+    # ─── ceph-disk-init: pre-partition the Ceph OSD disk ─────────────
+    # The OpenEBS device-localpv driver discovers candidate OSD disks
+    # by GPT partition label. The microvm declared the raw disk at
+    # /dev/disk/by-id/virtio-ceph-osd-${hostname} with `autoCreate=true`,
+    # which writes an ext4 header. This oneshot wipes that header and
+    # creates a single GPT partition labeled `${diskPartLabel}` so the
+    # OpenEBS device-node agent can claim it.
+    #
+    # Idempotent: if the disk already has the right partition label,
+    # the unit is a no-op. The agent's continuous scan picks up the
+    # new partition without restart.
+    systemd.services.ceph-disk-init = {
+      description = "Pre-partition the Ceph OSD disk for OpenEBS device-localpv";
+      wantedBy = [ "multi-user.target" ];
+      # Run before kubelet so the partition exists before Rook tries
+      # to consume any PVC bound to this disk. Order against
+      # containerd is good enough — kubelet starts after containerd.
+      before = [ "containerd.service" "kubelet.service" ];
+      after = [ "local-fs.target" ];
+      path = with pkgs; [ gptfdisk e2fsprogs util-linux coreutils gawk gnugrep ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        TimeoutStartSec = "60s";
+      };
+      script = let
+        label = constants.openebs.diskPartLabel;
+      in ''
+        set -eu
+
+        log() { echo "[ceph-disk-init] $*"; }
+
+        # Resolve the disk by its virtio serial. We can't bake the
+        # hostname into the path at Nix eval time because the same
+        # nixosSystem is shared across nodes — so we glob.
+        DISK="$(ls /dev/disk/by-id/virtio-ceph-osd-* 2>/dev/null | head -n1 || true)"
+        if [ -z "$DISK" ]; then
+          log "no /dev/disk/by-id/virtio-ceph-osd-* found — skipping (probably the data-only worker case)"
+          exit 0
+        fi
+        log "found Ceph disk: $DISK"
+
+        # If a partition with the right label already exists, we're done.
+        if sgdisk -p "$DISK" 2>/dev/null | grep -qE "^[[:space:]]+1[[:space:]].*${label}"; then
+          log "partition labeled '${label}' already present on $DISK — nothing to do"
+          exit 0
+        fi
+
+        log "wiping any existing filesystem header from $DISK"
+        wipefs -af "$DISK"
+
+        log "creating single GPT partition labeled '${label}' on $DISK"
+        # -n 1:0:0  — partition 1, default start, default end (whole disk)
+        # -t 1:8e00 — Linux LVM type code (acceptable for the OpenEBS device agent)
+        # -c 1:LABEL — set partition name (used as the GPT label)
+        sgdisk -n 1:0:0 -t 1:8e00 -c "1:${label}" "$DISK"
+
+        # Inform the kernel of the new partition table.
+        partprobe "$DISK" || blockdev --rereadpt "$DISK" || true
+
+        log "done — partition 1 on $DISK is labeled '${label}'"
+      '';
+    };
 
     # Symlink CNI plugins to expected location
     system.activationScripts.cni-plugins = ''

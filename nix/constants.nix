@@ -179,7 +179,6 @@ rec {
       url     = "https://github.com/argoproj/argo-helm/releases/download/argo-cd-9.5.11/argo-cd-9.5.11.tgz";
       hash    = "sha256-TyvlRDv3PifSR0mcO/un/24CJo2UzIBHeu8j4a6osB8=";
     };
-    # OpenEBS Local PV Device — added in a later task (#4)
     # rookCephOperator — added in a later task (#5)
     # rookCephCluster  — added in a later task (#6)
   };
@@ -191,20 +190,40 @@ rec {
     hash = "sha256-HVHN7NRC8fX4l4Pp4BabldNyck2iA8x13XpcTlChDOY=";
   };
 
-  # ─── Ceph cluster wiring (filled in by later tasks #4–#7) ──────────
-  # Placeholder — the rook-cluster.nix env module reads these once
-  # added. Kept as a stub so unrelated code can grep for the namespace.
+  # ─── OpenEBS Local PV Device (static installer) ───────────────────
+  # device-localpv has no Helm chart. We apply the upstream
+  # `device-operator.yaml` directly (same shape as cert-manager above)
+  # and ship our own StorageClass alongside.
+  #
+  # The driver matches devices by GPT partition label set in the
+  # StorageClass `parameters.devname`. A NixOS oneshot
+  # (`ceph-disk-init` in k8s-module.nix) pre-partitions
+  # /dev/disk/by-id/virtio-ceph-osd-* on first boot, labeling the
+  # single partition `ceph-osd`, so the agent auto-discovers it.
+  openebsDeviceLocalpv = {
+    version = "v0.9.0";
+    url  = "https://raw.githubusercontent.com/openebs/device-localpv/v0.9.0/deploy/device-operator.yaml";
+    hash = "sha256-+/9Leu4L7J3AK1+yEXlON54nNDloA1zjkm9WBwRLppM=";
+  };
+
+  # ─── Ceph cluster wiring (filled in by later tasks #5–#7) ──────────
   ceph = {
     namespace = "rook-ceph";
+    osd = {
+      diskSizeGi    = 10;          # per-node raw disk (lab-only; bump for real use)
+      perNodeCount  = 1;
+      sizeGiPerOsd  = 10;
+      partLabel     = "ceph-osd";  # GPT partition label; matches openebs.diskPartLabel
+    };
     dashboard = { host = "ceph.lab.local"; vip = "10.33.33.53"; };
     rgw       = { host = "s3.lab.local";   vip = "10.33.33.54"; };
   };
 
-  # ─── OpenEBS wiring (filled in by task #4) ─────────────────────────
+  # ─── OpenEBS wiring ─────────────────────────────────────────────────
   openebs = {
-    namespace        = "openebs-system";
+    namespace        = "openebs";                # matches upstream device-operator.yaml
     storageClassName = "openebs-device";
-    blockDeviceTag   = "ceph-osd";
+    diskPartLabel    = "ceph-osd";               # GPT partition label the SC matches
   };
 
   # ─── ArgoCD service (NodePort reachable from host) ─────────────────

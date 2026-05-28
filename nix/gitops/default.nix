@@ -16,19 +16,20 @@ let
   envDir = ./env;
   helm = import ./helm-chart.nix { inherit pkgs lib; };
 
-  # Import surviving environment modules. Ceph-related modules
-  # (openebs-device, rook-operator, rook-cluster, ceph-demo) are added
-  # by later tasks (#4–#8).
-  base        = import (envDir + "/base.nix")         { inherit pkgs lib; };
-  argocd      = import (envDir + "/argocd.nix")       { inherit pkgs lib helm; };
-  cilium      = import (envDir + "/cilium.nix")       { inherit pkgs lib helm; };
-  certManager = import (envDir + "/cert-manager.nix") { inherit pkgs lib; };
+  # Import environment modules. Rook modules (rook-operator,
+  # rook-cluster, ceph-demo) are added by later tasks (#5–#8).
+  base          = import (envDir + "/base.nix")           { inherit pkgs lib; };
+  argocd        = import (envDir + "/argocd.nix")         { inherit pkgs lib helm; };
+  cilium        = import (envDir + "/cilium.nix")         { inherit pkgs lib helm; };
+  certManager   = import (envDir + "/cert-manager.nix")   { inherit pkgs lib; };
+  openebsDevice = import (envDir + "/openebs-device.nix") { inherit pkgs lib; };
 
   # Combine all manifests
   allManifests = base.manifests
     ++ argocd.manifests
     ++ cilium.manifests
-    ++ certManager.manifests;
+    ++ certManager.manifests
+    ++ openebsDevice.manifests;
 
   emitStep = m:
     if m ? source then ''
