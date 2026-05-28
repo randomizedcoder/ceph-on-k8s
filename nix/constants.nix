@@ -237,8 +237,12 @@ rec {
   };
 
   # ─── SSH Configuration ─────────────────────────────────────────────
+  # Key-based auth only. Password and keyboard-interactive auth are
+  # disabled in sshd; host keys are baked into the VM image at build
+  # time from ./secrets/host-keys/ (see nix/secrets.nix). The host's
+  # known_hosts is pre-populated with the matching pubkeys so no
+  # TOFU / StrictHostKeyChecking=no is needed.
   ssh = {
-    password = "k8s";
     user = "root";
   };
 

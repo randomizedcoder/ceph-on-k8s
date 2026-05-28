@@ -3,12 +3,12 @@
 # Entry point for K8s MicroVM lifecycle testing.
 # Generates per-node tests and a cluster-wide test-all.
 #
-{ pkgs, lib }:
+{ pkgs, lib, knownHostsPath ? null }:
 let
   constants = import ./constants.nix { };
   mainConstants = import ../constants.nix;
   lifecycleLib = import ./lib.nix { inherit pkgs lib; };
-  k8sChecks = import ./k8s-checks.nix { inherit pkgs lib; };
+  k8sChecks = import ./k8s-checks.nix { inherit pkgs lib knownHostsPath; };
 
   inherit (lifecycleLib) colorHelpers timingHelpers processHelpers consoleHelpers;
   inherit (lifecycleLib) commonInputs sshInputs;
@@ -34,13 +34,9 @@ let
       shutdownTimeout = mainConstants.getTimeout nodeName "shutdown";
       exitTimeout = mainConstants.getTimeout nodeName "waitExit";
 
-      sshOpts = lib.concatStringsSep " " [
-        "-o" "StrictHostKeyChecking=no"
-        "-o" "UserKnownHostsFile=/dev/null"
-        "-o" "ConnectTimeout=5"
-        "-o" "LogLevel=ERROR"
-        "-o" "PubkeyAuthentication=no"
-      ];
+      # sshOpts unused — k8sChecks.* helpers carry their own strict
+      # opts. Kept around historically; left empty as a no-op.
+      sshOpts = "";
     in
     pkgs.writeShellApplication {
       name = "k8s-lifecycle-test-${nodeName}";

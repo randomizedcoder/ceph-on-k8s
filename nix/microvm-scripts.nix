@@ -2,7 +2,7 @@
 #
 # Helper scripts for managing K8s MicroVMs.
 #
-{ pkgs }:
+{ pkgs, knownHostsPath ? null }:
 let
   constants = import ./constants.nix;
 
@@ -10,6 +10,13 @@ let
   # QEMU's -name flag sets the process name, so use pgrep -x (exact match)
   # to avoid false positives from pgrep matching its own cmdline.
   vmPattern = "k8s-(cp0|cp1|cp2|w3)";
+
+  # Nix-store path to the host's known_hosts file produced by
+  # k8s-gen-secrets. NULL if ./secrets/known_hosts doesn't exist;
+  # callers should print a helpful error in that case.
+  knownHosts = if knownHostsPath != null
+    then "${knownHostsPath}"
+    else null;
 in
 {
   check = pkgs.writeShellApplication {
@@ -139,7 +146,7 @@ in
 
   ssh = pkgs.writeShellApplication {
     name = "k8s-vm-ssh";
-    runtimeInputs = with pkgs; [ openssh sshpass ];
+    runtimeInputs = with pkgs; [ openssh ];
     text = ''
       unset SSH_AUTH_SOCK
 
@@ -165,28 +172,33 @@ in
         cp2) HOST="${constants.network.ipv4.cp2}" ;;
         w3)  HOST="${constants.network.ipv4.w3}" ;;
         *)
-          echo "Unknown node: $NODE"
-          echo "Valid nodes: cp0, cp1, cp2, w3"
+          echo "Unknown node: $NODE" >&2
+          echo "Valid nodes: cp0, cp1, cp2, w3" >&2
           exit 1
           ;;
       esac
 
       SSH_KEY="./secrets/ssh-ed25519"
-      if [ -f "$SSH_KEY" ]; then
+      if [ ! -f "$SSH_KEY" ]; then
+        echo "ERROR: $SSH_KEY missing. Run 'nix run .#k8s-gen-secrets' first." >&2
+        exit 1
+      fi
+      ${if knownHosts == null then ''
+        echo "ERROR: known_hosts not baked into this app build (./secrets/known_hosts was missing at flake eval time)." >&2
+        echo "Run 'nix run .#k8s-gen-secrets' then retry." >&2
+        exit 1
+      '' else ''
         exec ssh \
-          -o StrictHostKeyChecking=no \
-          -o UserKnownHostsFile=/dev/null \
+          -o StrictHostKeyChecking=yes \
+          -o UserKnownHostsFile=${knownHosts} \
           -o IdentityFile="$SSH_KEY" \
           -o IdentitiesOnly=yes \
+          -o PasswordAuthentication=no \
+          -o KbdInteractiveAuthentication=no \
+          -o PreferredAuthentications=publickey \
           -o LogLevel=ERROR \
           "root@$HOST" "''${PASSTHROUGH_ARGS[@]}"
-      else
-        exec sshpass -p ${constants.ssh.password} ssh \
-          -o StrictHostKeyChecking=no \
-          -o UserKnownHostsFile=/dev/null \
-          -o LogLevel=ERROR \
-          "root@$HOST" "''${PASSTHROUGH_ARGS[@]}"
-      fi
+      ''}
     '';
   };
 

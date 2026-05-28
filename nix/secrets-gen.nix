@@ -1,20 +1,30 @@
 # nix/secrets-gen.nix
 #
-# Generates the SSH keypair into ./secrets/ for offline pre-generation.
+# Generates SSH material into ./secrets/ for offline pre-generation:
+#
+#   - ssh-ed25519, ssh-ed25519.pub                   — user keypair for SSH'ing into VMs
+#   - host-keys/k8s-<node>, host-keys/k8s-<node>.pub — per-node sshd host keypairs
+#   - known_hosts                                    — for the host's SSH client
 #
 # Usage:
 #   nix run .#k8s-gen-secrets             # generate (refuses if dir exists)
 #   nix run .#k8s-gen-secrets -- --force  # regenerate (overwrites)
 #
-# The source repo's matrix/anubis/observability/registry/pdns/forgejo
-# secret generation has been removed; this repo only needs an SSH key
-# for VM access (Rook generates its own dashboard admin password).
+# Password auth and `sshpass` are NOT used anywhere; key-based auth
+# with strict host-key checking is the only path in / out of the VMs.
 #
 { pkgs }:
+let
+  constants = import ./constants.nix;
+  # `node ip` table, expanded into the shell script at Nix eval time.
+  ipTable = builtins.concatStringsSep "\n" (builtins.map (n:
+    "  [${n}]=\"${constants.network.ipv4.${n}}\""
+  ) constants.nodeNames);
+in
 {
   genSecrets = pkgs.writeShellApplication {
     name = "k8s-gen-secrets";
-    runtimeInputs = with pkgs; [ coreutils openssh git ];
+    runtimeInputs = with pkgs; [ coreutils openssh git gnugrep ];
     text = ''
       set -euo pipefail
 
@@ -29,39 +39,61 @@
       DIR="./secrets"
 
       if [[ -d "$DIR" && "$FORCE" != "yes" ]]; then
-        echo "secrets/ already exists ($(find "$DIR" -maxdepth 1 -type f | wc -l) files)."
+        echo "secrets/ already exists ($(find "$DIR" -type f | wc -l) files)."
         echo "Pass --force to regenerate."
-        find "$DIR" -maxdepth 1 -type f -printf '%f\n' | sort
+        find "$DIR" -type f -printf '%P\n' | sort
         exit 1
       fi
 
-      mkdir -p "$DIR"
-      chmod 700 "$DIR"
+      rm -rf "$DIR"
+      mkdir -p "$DIR/host-keys"
+      chmod 700 "$DIR" "$DIR/host-keys"
 
-      echo "=== Generating SSH keypair for MicroVM access ==="
+      echo "=== Generating user SSH keypair ==="
+      # Used to authenticate FROM the host TO the VMs. Public half is
+      # baked into root's authorized_keys at VM build time.
+      ssh-keygen -t ed25519 -f "$DIR/ssh-ed25519" -N "" -C "ceph-on-k8s-host" -q
 
-      # ED25519 key pair. The public key is baked into each VM at build
-      # time (authorized_keys); the private key stays on the host.
-      ssh-keygen -t ed25519 -f "$DIR/ssh-ed25519" -N "" -C "ceph-on-k8s" -q
+      echo "=== Generating per-node sshd host keypairs ==="
+      # Build-time host keys baked into each VM image. The matching
+      # known_hosts entries below let the host trust them without TOFU.
+      declare -A NODE_IPS=(
+${ipTable}
+      )
 
-      chmod 600 "$DIR"/*
-      chmod 644 "$DIR/ssh-ed25519.pub"
+      : > "$DIR/known_hosts"
+      for node in ${builtins.concatStringsSep " " constants.nodeNames}; do
+        hostname="k8s-$node"
+        ssh-keygen -t ed25519 -f "$DIR/host-keys/$hostname" -N "" \
+          -C "root@$hostname" -q
+        # known_hosts format: '<host>[,<host>...] <keytype> <pubkey>'
+        # We add two entries per node: by IPv4 and by short hostname.
+        pubkey="$(awk '{print $1, $2}' "$DIR/host-keys/$hostname.pub")"
+        ip="''${NODE_IPS[$node]}"
+        echo "$ip $pubkey"        >> "$DIR/known_hosts"
+        echo "$hostname $pubkey"  >> "$DIR/known_hosts"
+      done
 
-      # Nix flakes can only read git-tracked files. Stage the SSH pubkey
-      # so `builtins.pathExists` and `readFile` work during Nix eval.
-      # The private key is git-ignored via secrets/ being excluded from
-      # the regular gitignore but the user must avoid committing it.
+      chmod 600 "$DIR/ssh-ed25519" "$DIR"/host-keys/k8s-*
+      chmod 644 "$DIR/ssh-ed25519.pub" "$DIR"/host-keys/*.pub "$DIR/known_hosts"
+
+      # Nix flakes only see git-tracked files; `git add -N` lets
+      # `builtins.pathExists` / `readFile` work without committing.
+      # Review discipline keeps the private halves out of commits;
+      # .gitignore explicitly excludes secrets/ssh-ed25519 and the
+      # host-keys/ private keys.
       if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        git add "$DIR" 2>/dev/null || true
-        echo "(staged secrets/ for Nix — remember to 'git reset secrets/' before committing)"
+        git add --intent-to-add "$DIR" 2>/dev/null || true
+        echo "(staged secrets/ for Nix -- do not 'git add' the private keys)"
       fi
 
       echo ""
-      echo "=== Generated $(find "$DIR" -maxdepth 1 -type f | wc -l) files in $DIR/ ==="
-      find "$DIR" -maxdepth 1 -type f -printf '%f\n' | sort
+      echo "=== Generated $(find "$DIR" -type f | wc -l) files in $DIR/ ==="
+      find "$DIR" -type f -printf '  %P\n' | sort
       echo ""
-      echo "Next: rebuild the cluster to pick up the new keypair."
-      echo "  nix run .#k8s-cluster-rebuild"
+      echo "Next:"
+      echo "  nix run .#k8s-render-manifests   # if you also changed nix/gitops/"
+      echo "  nix run .#k8s-cluster-rebuild    # pick up the new keys"
     '';
   };
 }

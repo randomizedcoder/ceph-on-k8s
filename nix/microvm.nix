@@ -22,7 +22,8 @@
   nodePki,        # Per-node PKI bundle (from certs.mkNodePki)
   k8sManifests,   # Rendered k8s manifests derivation
   k8sSecrets ? null,       # Pre-generated Secret manifests (from secrets.nix; null if absent)
-  sshPubKey ? null,        # SSH ED25519 public key for authorized_keys (from secrets.nix; null if absent)
+  sshPubKey ? null,        # User SSH pubkey for root's authorized_keys (from secrets.nix; null if absent)
+  hostKey ? null,          # Per-node sshd host PRIVATE key (path; from secrets.nix). REQUIRED — no fallback host-key generation
 }:
 let
   constants = import ./constants.nix;
@@ -136,17 +137,28 @@ let
         };
         networking.useDHCP = false;
 
-        # SSH: key-based auth (preferred) + password fallback for testing
+        # SSH: key-based auth ONLY. No password / kbd-interactive.
+        # Host key is the build-time per-node key from
+        # ./secrets/host-keys/k8s-<node>, copied below by the
+        # activation script. NixOS's default sshd would generate a
+        # fresh host key on first boot; we disable that and provide
+        # our own so the host's known_hosts entry matches deterministically.
         services.openssh = {
           enable = true;
           settings = {
-            PasswordAuthentication = lib.mkForce true;
-            PermitRootLogin = lib.mkForce "yes";
-            KbdInteractiveAuthentication = lib.mkForce true;
+            PasswordAuthentication = lib.mkForce false;
+            KbdInteractiveAuthentication = lib.mkForce false;
+            PermitRootLogin = lib.mkForce "prohibit-password";
           };
+          # Don't let sshd run `ssh-keygen` on first boot; we own
+          # the host keys.
+          hostKeys = [
+            { type = "ed25519"; path = "/etc/ssh/ssh_host_ed25519_key"; }
+          ];
         };
         users.users.root = {
-          password = constants.ssh.password;
+          # No password — key-based auth only.
+          hashedPassword = "!";
           openssh.authorizedKeys.keys =
             lib.optional (sshPubKey != null) sshPubKey;
         };
@@ -160,6 +172,23 @@ let
           chmod 644 ${pki}/*.crt ${pki}/*.pub 2>/dev/null || true
           chmod 600 ${pki}/*-kubeconfig 2>/dev/null || true
           chmod 644 ${pki}/kubelet-config.yaml 2>/dev/null || true
+        '';
+
+        # ─── SSH host key: copy build-time key into /etc/ssh ───────────
+        # The matching pubkey is in the host's ./secrets/known_hosts,
+        # so SSH connections from the host succeed without TOFU. If
+        # hostKey is null (./secrets/ doesn't exist), bail out at
+        # activation rather than silently letting sshd generate a fresh
+        # key that nobody trusts.
+        system.activationScripts.ssh-host-key = ''
+          ${if hostKey == null then ''
+            echo "ERROR: no SSH host key supplied. Run 'nix run .#k8s-gen-secrets' first." >&2
+            exit 1
+          '' else ''
+            install -d -m 0755 /etc/ssh
+            install -m 0600 ${hostKey}     /etc/ssh/ssh_host_ed25519_key
+            install -m 0644 ${hostKey}.pub /etc/ssh/ssh_host_ed25519_key.pub
+          ''}
         '';
 
         # K8s services

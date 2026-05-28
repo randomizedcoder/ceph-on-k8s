@@ -67,8 +67,10 @@
         secrets = import (nixDir + "/secrets.nix") {
           inherit pkgs lib;
         };
-        k8sSecrets = secrets.k8sSecrets;  # null if ./secrets/ doesn't exist
-        sshPubKey  = secrets.sshPubKey;   # null if no SSH key generated
+        k8sSecrets       = secrets.k8sSecrets;       # null if ./secrets/ doesn't exist
+        sshPubKey        = secrets.sshPubKey;        # null if no user SSH key generated
+        hostKeyPath      = secrets.hostKeyPath;      # nodeName -> path|null
+        knownHostsPath   = secrets.knownHostsPath;   # null if not generated
 
         # Secrets generation script
         secretsGen = import (nixDir + "/secrets-gen.nix") { inherit pkgs; };
@@ -84,6 +86,7 @@
             inherit nodeName role;
             nodePki = certs.mkNodePki { inherit nodeName role; };
             inherit k8sManifests k8sSecrets sshPubKey;
+            hostKey = hostKeyPath nodeName;
           };
 
         # Generate MicroVM packages for all nodes
@@ -96,7 +99,7 @@
 
         # Import lifecycle testing framework (Linux only)
         lifecycle = lib.optionalAttrs pkgs.stdenv.isLinux (
-          import (nixDir + "/lifecycle") { inherit pkgs lib; }
+          import (nixDir + "/lifecycle") { inherit pkgs lib knownHostsPath; }
         );
 
         # Rendered manifests script
@@ -121,8 +124,14 @@
         apps = lib.optionalAttrs pkgs.stdenv.isLinux (
           let
             networkScripts = import (nixDir + "/network-setup.nix") { inherit pkgs; };
-            vmScripts = import (nixDir + "/microvm-scripts.nix") { inherit pkgs; };
-            chaosScripts = import (nixDir + "/chaos-scripts.nix") { inherit pkgs; };
+            vmScripts = import (nixDir + "/microvm-scripts.nix") {
+              inherit pkgs;
+              inherit knownHostsPath;
+            };
+            chaosScripts = import (nixDir + "/chaos-scripts.nix") {
+              inherit pkgs;
+              inherit knownHostsPath;
+            };
           in
           {
             # Network management

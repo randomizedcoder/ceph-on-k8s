@@ -20,7 +20,6 @@ pkgs.mkShell {
     # ─── Infra / debug ───────────────────────────────────────────────
     socat
     expect
-    sshpass
     jq
     nftables
     iproute2

@@ -72,11 +72,14 @@ rec {
     "C6" = { name = "Shutdown All"; };
   };
 
+  # Serial-console expect runs against `login:` only for legacy
+  # boot-debugging. With password auth disabled, this can no longer
+  # log in interactively — kept as inert config in case a future
+  # expect script wants the patterns.
   expect = {
     loginPrompt = "login:";
     shellPromptPattern = "root@k8s-.*:.*#";
     username = "root";
-    password = mainConstants.ssh.password;
     defaultTimeout = 30;
   };
 }

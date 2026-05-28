@@ -11,7 +11,7 @@ let
     coreutils gnugrep gnused gawk procps netcat-gnu socat expect bc util-linux
   ];
 
-  sshInputs = with pkgs; [ openssh sshpass ];
+  sshInputs = with pkgs; [ openssh ];
 
   colorHelpers = ''
     _reset='\033[0m'

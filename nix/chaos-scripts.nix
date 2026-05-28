@@ -15,16 +15,17 @@
 #
 # See README "Chaos / Failover Test" section for usage.
 #
-{ pkgs }:
+{ pkgs, knownHostsPath ? null }:
 let
   constants = import ./constants.nix;
-  vmScripts = import ./microvm-scripts.nix { inherit pkgs; };
+  vmScripts = import ./microvm-scripts.nix { inherit pkgs knownHostsPath; };
+  knownHosts = if knownHostsPath != null then "${knownHostsPath}" else null;
 in
 {
   chaosFailover = pkgs.writeShellApplication {
     name = "k8s-chaos-failover";
     runtimeInputs = with pkgs; [
-      bc gawk coreutils procps gnused sshpass openssh
+      bc gawk coreutils procps gnused openssh
     ];
     text = ''
       set -uo pipefail
@@ -39,8 +40,18 @@ in
       EXPECTED_OSDS=${toString (builtins.length constants.nodeNames)}
 
       CP0_IP="${constants.network.ipv4.cp0}"
-      SSH_PASS="${constants.ssh.password}"
+      SSH_KEY="./secrets/ssh-ed25519"
       CEPH_NS="${constants.ceph.namespace}"
+
+      if [ ! -f "$SSH_KEY" ]; then
+        echo "ERROR: $SSH_KEY missing. Run 'nix run .#k8s-gen-secrets' first." >&2
+        exit 1
+      fi
+      ${if knownHosts == null then ''
+        echo "ERROR: known_hosts not baked into this app (./secrets/known_hosts missing at flake eval)." >&2
+        echo "Run 'nix run .#k8s-gen-secrets' then retry." >&2
+        exit 1
+      '' else ""}
 
       usage() {
         cat <<EOF
@@ -87,9 +98,14 @@ in
 
       # ─── kubectl + ceph via SSH to cp0 ────────────────────────────────
       ssh_cp0() {
-        sshpass -p "$SSH_PASS" ssh \
-          -o StrictHostKeyChecking=no \
-          -o UserKnownHostsFile=/dev/null \
+        ssh \
+          -o StrictHostKeyChecking=yes \
+          -o UserKnownHostsFile=${if knownHosts == null then "./secrets/known_hosts" else knownHosts} \
+          -o IdentityFile="$SSH_KEY" \
+          -o IdentitiesOnly=yes \
+          -o PasswordAuthentication=no \
+          -o KbdInteractiveAuthentication=no \
+          -o PreferredAuthentications=publickey \
           -o LogLevel=ERROR \
           "root@$CP0_IP" \
           "$@"
