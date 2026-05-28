@@ -16,8 +16,7 @@ let
   envDir = ./env;
   helm = import ./helm-chart.nix { inherit pkgs lib; };
 
-  # Import environment modules. The ceph-demo workload is added by
-  # task #8; Ingress for dashboard/RGW is task #7.
+  # Import environment modules.
   base          = import (envDir + "/base.nix")           { inherit pkgs lib; };
   argocd        = import (envDir + "/argocd.nix")         { inherit pkgs lib helm; };
   cilium        = import (envDir + "/cilium.nix")         { inherit pkgs lib helm; };
@@ -25,6 +24,7 @@ let
   openebsDevice = import (envDir + "/openebs-device.nix") { inherit pkgs lib; };
   rookOperator  = import (envDir + "/rook-operator.nix")  { inherit pkgs lib helm; };
   rookCluster   = import (envDir + "/rook-cluster.nix")   { inherit pkgs lib helm; };
+  cephDemo      = import (envDir + "/ceph-demo.nix")      { inherit pkgs lib; };
 
   # Combine all manifests
   allManifests = base.manifests
@@ -33,7 +33,8 @@ let
     ++ certManager.manifests
     ++ openebsDevice.manifests
     ++ rookOperator.manifests
-    ++ rookCluster.manifests;
+    ++ rookCluster.manifests
+    ++ cephDemo.manifests;
 
   emitStep = m:
     if m ? source then ''
