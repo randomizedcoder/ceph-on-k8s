@@ -20,11 +20,15 @@ k8s-*-ceph.img
 # private keys, never commit. Rebuilt from certs.nix at VM build time.
 certs/
 
-# Pre-generated application secrets live in ./secrets/ but are NOT
-# gitignored here — Nix flakes can only read git-tracked files, so the
-# gen-secrets script uses `git add -N` to make them visible to Nix
-# without staging content. A pre-commit hook or review discipline
-# prevents accidental commits.
+# Pre-generated application secrets. The SSH private key and pubkey
+# in ./secrets/ must NOT land in git — secrets/ssh-ed25519 is a
+# private key, secrets/ssh-ed25519.pub is harmless but excluded for
+# symmetry. The Nix flake reads them via `builtins.pathExists` /
+# `readFile` which works on untracked files (the source repo's
+# `git add -N` dance is unnecessary here since secrets.nix has a
+# fallback path when ./secrets/ is absent).
+secrets/ssh-ed25519
+secrets/ssh-ed25519.pub
 
 # Chaos / failover test logs
 chaos-logs/
