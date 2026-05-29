@@ -271,6 +271,33 @@ rec {
       fsName   = "ceph-filesystem";
       mountDir = "/mnt/cephfs";
     };
+
+    # Default replication factor for all pools — referenced by
+    # `replicapool`, the CephFS pools, the RGW pools, and each
+    # `workloadPools` entry below. Bump once here to fan out.
+    defaultReplication = 3;
+
+    # Per-workload CephBlockPools. Each member becomes:
+    #   - one `CephBlockPool` named <poolName>
+    #   - one `StorageClass` named <storageClassName> (non-default)
+    # Workloads pick their pool via `storageClassName:` on the PVC.
+    # All pools currently share the same 4 OSDs (no `deviceClass`)
+    # — see plan `o-curried-toucan.md` Phase 1.
+    workloadPools = {
+      redpanda = {
+        poolName         = "redpanda-block";
+        storageClassName = "ceph-block-redpanda";
+        # Redpanda recommends xfs for the data directory.
+        fstype           = "xfs";
+      };
+      clickhouse = {
+        poolName         = "clickhouse-block";
+        storageClassName = "ceph-block-clickhouse";
+        # ClickHouse works fine on ext4 — same fstype as the default
+        # `ceph-block` SC so no operational surprise.
+        fstype           = "ext4";
+      };
+    };
   };
 
   # ─── ArgoCD service (NodePort reachable from host) ─────────────────

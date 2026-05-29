@@ -42,6 +42,71 @@ let
     "${indent}  - name: \"${constants.ceph.osd.devicePath}${hostname}\"\n"
   ) constants.nodeNames;
 
+  # Render one CephBlockPool entry under `cephBlockPools:` — used for
+  # both `replicapool` (the default block SC) and every per-workload
+  # pool defined in `constants.ceph.workloadPools`. The CSI parameter
+  # block is identical across all pools; only pool/SC name, isDefault,
+  # and fstype vary.
+  #
+  # Built with explicit indentation (same reason as perNodeDevicesYaml
+  # above): Nix '' '' strings strip a common indent computed from the
+  # source, but the existing `${perNodeDevicesYaml}` interpolation in
+  # `clusterValuesYaml` sits at column 0 so no strip happens. We need
+  # to emit lines pre-indented to the level the chart's values.yaml
+  # context wants (4 spaces under `cephBlockPools:` at column 4).
+  renderBlockPool = { poolName, storageClassName, isDefault, fstype }: let
+    i4 = "    ";    # column of `- name:` (sibling of `cephBlockPools:`)
+    i6 = "      ";  # column of `spec:` / `storageClass:`
+    i8 = "        ";# column of leaf fields
+    i10 = "          "; # column of CSI parameter keys
+    ns = constants.ceph.namespace;
+  in
+    "${i4}- name: ${poolName}\n" +
+    "${i6}spec:\n" +
+    "${i8}failureDomain: host\n" +
+    "${i8}replicated:\n" +
+    "${i10}size: ${toString constants.ceph.defaultReplication}\n" +
+    "${i6}storageClass:\n" +
+    "${i8}enabled: true\n" +
+    "${i8}name: ${storageClassName}\n" +
+    "${i8}isDefault: ${if isDefault then "true" else "false"}\n" +
+    "${i8}reclaimPolicy: Delete\n" +
+    "${i8}allowVolumeExpansion: true\n" +
+    # The chart's templates/cephblockpool.yaml does NOT add CSI secret
+    # references — the example values.yaml expects users to include
+    # them in `parameters`. Without them, dynamic provisioning fails
+    # with "provided secret is empty".
+    "${i8}parameters:\n" +
+    "${i10}imageFormat: \"2\"\n" +
+    "${i10}imageFeatures: layering\n" +
+    "${i10}csi.storage.k8s.io/fstype: ${fstype}\n" +
+    "${i10}csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner\n" +
+    "${i10}csi.storage.k8s.io/provisioner-secret-namespace: ${ns}\n" +
+    "${i10}csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner\n" +
+    "${i10}csi.storage.k8s.io/controller-expand-secret-namespace: ${ns}\n" +
+    "${i10}csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node\n" +
+    "${i10}csi.storage.k8s.io/node-stage-secret-namespace: ${ns}\n";
+
+  # The default `replicapool` plus every workload-specific pool from
+  # constants.ceph.workloadPools. New workloads = one new attrset
+  # member; no edits to this file.
+  blockPoolsYaml = lib.concatStrings (
+    [
+      (renderBlockPool {
+        poolName         = "replicapool";
+        storageClassName = "ceph-block";
+        isDefault        = true;
+        fstype           = "ext4";
+      })
+    ]
+    ++ lib.mapAttrsToList
+        (_: pool: renderBlockPool {
+          inherit (pool) poolName storageClassName fstype;
+          isDefault = false;
+        })
+        constants.ceph.workloadPools
+  );
+
   clusterValuesYaml = ''
     # operatorNamespace must match the rook-operator chart's namespace.
     operatorNamespace: ${constants.ceph.namespace}
@@ -192,33 +257,15 @@ ${perNodeDevicesYaml}
             cpu: 100m
             memory: 256Mi
 
-    # ─── Block pool (RBD) ───────────────────────────────────────────
+    # ─── Block pools (RBD) ──────────────────────────────────────────
+    # `replicapool` is the default block SC for general workloads;
+    # each entry in `constants.ceph.workloadPools` adds its own
+    # logically-isolated pool + StorageClass on the same OSDs (see
+    # plan o-curried-toucan.md Phase 1). All rendered from the
+    # `renderBlockPool` helper above. The interpolation sits at column
+    # 0 so the helper's pre-indented lines stay at their intended depth.
     cephBlockPools:
-    - name: replicapool
-      spec:
-        failureDomain: host
-        replicated:
-          size: 3
-      storageClass:
-        enabled: true
-        name: ceph-block
-        isDefault: true
-        reclaimPolicy: Delete
-        allowVolumeExpansion: true
-        # The chart's templates/cephblockpool.yaml does NOT add CSI
-        # secret references — the example values.yaml expects users to
-        # include them in `parameters`. Without them, dynamic
-        # provisioning fails with "provided secret is empty".
-        parameters:
-          imageFormat: "2"
-          imageFeatures: layering
-          csi.storage.k8s.io/fstype: ext4
-          csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
-          csi.storage.k8s.io/provisioner-secret-namespace: ${constants.ceph.namespace}
-          csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
-          csi.storage.k8s.io/controller-expand-secret-namespace: ${constants.ceph.namespace}
-          csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
-          csi.storage.k8s.io/node-stage-secret-namespace: ${constants.ceph.namespace}
+${blockPoolsYaml}
 
     # ─── Shared filesystem (CephFS, RWX) ───────────────────────────
     cephFileSystems:

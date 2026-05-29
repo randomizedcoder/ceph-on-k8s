@@ -23,6 +23,54 @@ reclaimPolicy: Delete
 allowVolumeExpansion: true
 volumeBindingMode: Immediate
 ---
+# Source: rook-ceph-cluster/templates/cephblockpool.yaml
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: "ceph-block-clickhouse"
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: rook-ceph.rbd.csi.ceph.com
+parameters:
+  pool: "clickhouse-block"
+  clusterID: "rook-ceph"
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
+  csi.storage.k8s.io/fstype: ext4
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+  imageFeatures: layering
+  imageFormat: "2"
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+---
+# Source: rook-ceph-cluster/templates/cephblockpool.yaml
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: "ceph-block-redpanda"
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: rook-ceph.rbd.csi.ceph.com
+parameters:
+  pool: "redpanda-block"
+  clusterID: "rook-ceph"
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
+  csi.storage.k8s.io/fstype: xfs
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+  imageFeatures: layering
+  imageFormat: "2"
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+---
 # Source: rook-ceph-cluster/templates/cephfilesystem.yaml
 kind: StorageClass
 apiVersion: storage.k8s.io/v1
@@ -221,6 +269,28 @@ kind: CephBlockPool
 apiVersion: ceph.rook.io/v1
 metadata:
   name: replicapool
+  namespace: rook-ceph # namespace:cluster
+spec:
+  failureDomain: host
+  replicated:
+    size: 3
+---
+# Source: rook-ceph-cluster/templates/cephblockpool.yaml
+kind: CephBlockPool
+apiVersion: ceph.rook.io/v1
+metadata:
+  name: clickhouse-block
+  namespace: rook-ceph # namespace:cluster
+spec:
+  failureDomain: host
+  replicated:
+    size: 3
+---
+# Source: rook-ceph-cluster/templates/cephblockpool.yaml
+kind: CephBlockPool
+apiVersion: ceph.rook.io/v1
+metadata:
+  name: redpanda-block
   namespace: rook-ceph # namespace:cluster
 spec:
   failureDomain: host

@@ -193,6 +193,36 @@ The change propagates through `nix/microvm.nix` (image file size) and the
 `nix/gitops/env/rook-cluster.nix` (PVC request size). Bumping the host
 image and the PVC request to the same value keeps the layers consistent.
 
+### Per-workload pools
+
+`replicapool` / `ceph-block` is the default block StorageClass for
+generic workloads. Upcoming stateful apps — Redpanda and ClickHouse
+are the immediate targets — each get their **own** `CephBlockPool` +
+matching `StorageClass`, so quota, CRUSH rule, and class identity are
+per-workload. Source of truth is `constants.ceph.workloadPools` in
+`nix/constants.nix`:
+
+```nix
+ceph.workloadPools = {
+  redpanda   = { poolName = "redpanda-block";   storageClassName = "ceph-block-redpanda";   fstype = "xfs";  };
+  clickhouse = { poolName = "clickhouse-block"; storageClassName = "ceph-block-clickhouse"; fstype = "ext4"; };
+};
+```
+
+Adding a workload = one new attrset member. The `renderBlockPool` helper
+in `nix/gitops/env/rook-cluster.nix` fans the entries out into the
+`cephBlockPools:` list with the same CSI parameter block as
+`replicapool`.
+
+All pools currently share the same 4 OSDs — logical isolation
+(per-pool quota, CRUSH rule, class) only, no physical isolation. The
+production target (NVMe + RoCEv2 + RDMA) will eventually want either
+device-class tagging (Phase 2 — add a second OSD disk per node tagged
+e.g. `fast`, pin the hot pool to that class via `deviceClass:`) or a
+separate storage backend like OpenEBS Mayastor for the hot path. Both
+are deferred; the per-workload-pool pattern is the foundation either
+extension builds on.
+
 ## Network exposure
 
 Two services need to be reachable from outside the cluster: the Ceph MGR

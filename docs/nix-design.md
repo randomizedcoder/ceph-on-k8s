@@ -457,7 +457,10 @@ running, ArgoCD is uninvolved.
 - Two new chart pins (`rookCephOperator`, `rookCephCluster`) and a
   separate static-YAML pin for cert-manager.
 - A `ceph` attrset in `constants.nix` collecting OSD, dashboard, RGW,
-  MON host list, and external-client config.
+  MON host list, external-client config, and a `workloadPools`
+  sub-attrset (Redpanda + ClickHouse) that the
+  `renderBlockPool` helper in `rook-cluster.nix` fans out into the
+  `cephBlockPools:` values list.
 - Five new env modules: `rook-operator.nix`, `rook-cluster.nix`,
   `ceph-demo.nix`, `ceph-external-client.nix`, plus a rewritten
   `cilium.nix` (multi-pool IPAM + BGPControlPlane CRDs +

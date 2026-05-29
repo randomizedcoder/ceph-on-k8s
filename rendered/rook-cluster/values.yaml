@@ -159,7 +159,13 @@
             cpu: 100m
             memory: 256Mi
 
-    # ─── Block pool (RBD) ───────────────────────────────────────────
+    # ─── Block pools (RBD) ──────────────────────────────────────────
+    # `replicapool` is the default block SC for general workloads;
+    # each entry in `constants.ceph.workloadPools` adds its own
+    # logically-isolated pool + StorageClass on the same OSDs (see
+    # plan o-curried-toucan.md Phase 1). All rendered from the
+    # `renderBlockPool` helper above. The interpolation sits at column
+    # 0 so the helper's pre-indented lines stay at their intended depth.
     cephBlockPools:
     - name: replicapool
       spec:
@@ -172,10 +178,6 @@
         isDefault: true
         reclaimPolicy: Delete
         allowVolumeExpansion: true
-        # The chart's templates/cephblockpool.yaml does NOT add CSI
-        # secret references — the example values.yaml expects users to
-        # include them in `parameters`. Without them, dynamic
-        # provisioning fails with "provided secret is empty".
         parameters:
           imageFormat: "2"
           imageFeatures: layering
@@ -186,6 +188,49 @@
           csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
           csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
           csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+    - name: clickhouse-block
+      spec:
+        failureDomain: host
+        replicated:
+          size: 3
+      storageClass:
+        enabled: true
+        name: ceph-block-clickhouse
+        isDefault: false
+        reclaimPolicy: Delete
+        allowVolumeExpansion: true
+        parameters:
+          imageFormat: "2"
+          imageFeatures: layering
+          csi.storage.k8s.io/fstype: ext4
+          csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+          csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+          csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+          csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
+          csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+          csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+    - name: redpanda-block
+      spec:
+        failureDomain: host
+        replicated:
+          size: 3
+      storageClass:
+        enabled: true
+        name: ceph-block-redpanda
+        isDefault: false
+        reclaimPolicy: Delete
+        allowVolumeExpansion: true
+        parameters:
+          imageFormat: "2"
+          imageFeatures: layering
+          csi.storage.k8s.io/fstype: xfs
+          csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+          csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+          csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+          csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
+          csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+          csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+
 
     # ─── Shared filesystem (CephFS, RWX) ───────────────────────────
     cephFileSystems:
