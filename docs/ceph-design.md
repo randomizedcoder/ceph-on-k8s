@@ -17,10 +17,15 @@ built; see [`nix-design.md`](./nix-design.md) for that.
   pattern inherited from the source repo `nix-k8s-examples`. No in-cluster
   Helm templating; all manifests are produced at Nix build time and committed
   to git.
-- Use **OpenEBS Local PV Device** as the underlying provisioner so each OSD
-  is backed by a raw-block PersistentVolume carved from a dedicated host disk
-  per node. This gives Rook a CSI StorageClass it can consume via PVC-based
-  OSDs (`storageClassDeviceSets`), exactly the cloud-native pattern.
+- Use **direct device discovery** so Rook's OSD pods reference raw
+  `/dev/disk/by-id/virtio-ceph-osd-<host>` paths directly via the
+  CephCluster CR's `storage.nodes[].devices` list. No CSI layer below
+  Rook. We initially planned to use OpenEBS Local PV Device for
+  PVC-backed OSDs, but the project is archived and its v0.9.0 agent
+  requires a non-trivial meta-partition scheme. Direct device discovery
+  is the canonical Rook fallback and works without an intermediate CSI
+  layer — a small `ceph-disk-init` oneshot in `nix/k8s-module.nix` wipes
+  any filesystem header so `ceph-volume` can take the disk fresh.
 - Survive single-node failure on the storage layer (replication factor 3
   across `host` failure domain).
 - Surface the Ceph MGR dashboard and the RGW S3 endpoint on stable VIPs
@@ -39,17 +44,15 @@ The layered architecture is:
         │
   Ceph services       ─ RBD pool · CephFS · RGW (S3) · MGR dashboard
         │
-  Rook-Ceph cluster   ─ 3 MON · 2 MGR · 4 OSD (PVC-based) · 3 MDS · 2 RGW
+  Rook-Ceph cluster   ─ 3 MON · 2 MGR · 4 OSD (direct device) · 2 MDS · 1 RGW
         │
   Rook-Ceph operator  ─ CSI plugins (rbd + cephfs) on every node
-        │
-  OpenEBS Local-PV-Device         ─ StorageClass `openebs-device`
-   (NDM tags + raw-block PVs)
         │
   Guest OS            ─ /dev/disk/by-id/virtio-ceph-osd-<host>
                          (10 GiB, unformatted, raw)
         │
   MicroVM             ─ second virtio-blk volume: ${hostname}-ceph.img
+                         with serial=ceph-osd-<host>
         │
   Host                ─ sparse 10 GiB file per node in the repo root
 ```
@@ -61,19 +64,19 @@ Each layer is owned by exactly one piece of software:
 | Sparse file on host | nix microvm runner (`autoCreate = true`) |
 | `virtio-blk` device | QEMU launched by microvm.nix |
 | Raw block in guest | Linux kernel (driver `virtio_blk`) |
-| `BlockDevice` CR (claim of the raw disk) | OpenEBS NDM |
-| `openebs-device` StorageClass | OpenEBS Local PV Device CSI |
-| `ceph-osd-set` PVCs (one per node) | Rook operator |
-| OSD daemons (Bluestore on raw block) | Rook cluster controller |
+| `/dev/disk/by-id/virtio-ceph-osd-<host>` symlink | systemd-udevd (from `serial=`) |
+| OSD daemon (Bluestore on raw block) | Rook cluster controller via `ceph-volume raw prepare --bluestore` |
 | RBD pool / CephFS / RGW | Rook cluster controller |
 | `ceph-block` / `ceph-filesystem` / `ceph-bucket` StorageClasses | Rook |
 | Application PVCs / OBCs | Workloads |
 
 This strict layering means the failure of any one layer has a known blast
 radius and a known repair procedure. For example, replacing a node's disk
-means: stop the VM, delete `<host>-ceph.img`, restart the VM — NDM will
-re-discover, OpenEBS will provision a fresh PV, Rook will rebuild the OSD,
-Ceph will recover the missing replicas from the surviving 3 OSDs.
+means: stop the VM, delete `<host>-ceph.img`, restart the VM — the disk
+comes back as a fresh raw device, the `ceph-disk-init` oneshot zeros any
+filesystem header, Rook's OSD prepare job runs `ceph-volume raw prepare`,
+the OSD rejoins, and Ceph recovers the missing replicas from the
+surviving 3 OSDs.
 
 ## Daemon topology
 
@@ -84,9 +87,9 @@ anti-affinity rule. The 4-node lab cluster runs:
 |---|---|---|---|---|
 | MON | 3 | nodeAffinity `node-role.kubernetes.io/control-plane` | host | 3-way quorum survives one CP loss |
 | MGR | 2 | spread across CPs | host | active/standby HA |
-| OSD | 4 | one PVC per node | host (topology spread) | one OSD per physical disk |
-| MDS | 3 | spread; 1 active + 2 standby | host | CephFS HA |
-| RGW | 2 | spread | host | S3 HA |
+| OSD | 4 | one raw disk per node | host (topology spread) | one OSD per physical disk |
+| MDS | 2 | spread; 1 active + 1 hot standby | host | CephFS HA (`activeStandby: true`) |
+| RGW | 1 | one instance | host | S3 endpoint |
 
 Plus the supporting controllers and CSI:
 
@@ -95,9 +98,12 @@ Plus the supporting controllers and CSI:
 - 4 × `csi-rbdplugin` DaemonSet pods (one per node), 4 × `csi-cephfsplugin` DaemonSet pods
 - 1 × `rook-ceph-tools` Deployment for `ceph` CLI debugging
 
-Total: ~26 pods, ~6 GiB aggregate RAM. The source repo's CP nodes are 8 GiB /
-4 vCPU and the worker is 6 GiB / 2 vCPU; this is tight and a memory bump to
-10 GiB CP / 8 GiB worker is required before the CephCluster CR is applied.
+Total: ~26 pods, ~6 GiB aggregate RAM. CP nodes are sized **10 GiB / 4
+vCPU** and the worker **8 GiB / 2 vCPU** (`vm.controlPlane` /
+`vm.worker` in `nix/constants.nix`). That sizing is the minimum needed
+to fit Rook's footprint plus the underlying K8s control plane; lower
+values cause the OSD prepare jobs to OOM and Rook never reaches
+`HEALTH_OK`.
 
 ### Why MONs prefer control planes
 
@@ -113,31 +119,31 @@ is added to every Rook daemon even though the source repo does not currently
 taint CPs — this is a no-op today and prophylactic against any future taint
 change.
 
-### Why OSDs are PVC-based, not direct-device
+### Why OSDs are direct-device, not PVC-based
 
 Rook supports two OSD modes:
 
-1. **Direct device discovery**: `storage.nodes[].devices=[{name: vdb}]` in
-   the CephCluster CR. The OSD pod runs with `hostPath` access to the raw
-   device, `ceph-volume` formats it, the OSD is bound to that node.
+1. **Direct device discovery**: `storage.nodes[].devices=[{name: …}]` in
+   the CephCluster CR. The OSD pod runs with `hostPath` access to the
+   raw device, `ceph-volume` formats it, the OSD is bound to that node.
 2. **PVC-based** (`storageClassDeviceSets`): the OSD requests a
-   `volumeMode: Block` PVC from a StorageClass. The CSI driver attaches a
-   raw block PV to the OSD pod, `ceph-volume` formats it. The OSD is
+   `volumeMode: Block` PVC from a StorageClass. The CSI driver attaches
+   a raw block PV to the OSD pod, `ceph-volume` formats it. The OSD is
    bound to the PV, not the node.
 
-This repo uses mode 2 (PVC-based on top of OpenEBS) for three reasons:
+This repo uses mode 1. We originally aimed for mode 2 with OpenEBS Local
+PV Device as the underlying CSI provisioner, but OpenEBS Local PV Device
+is archived and its v0.9.0 agent requires a non-trivial meta-partition
+scheme that's poorly documented. Direct device discovery is the
+canonical Rook fallback and has zero extra components in the dependency
+chain.
 
-- It matches the user's intent ("OpenEBS managed block stores").
-- It cleanly decouples the OSD identity from the host's device naming. The
-  OSD doesn't care whether `/dev/vdb` is the right disk; it asks the CSI
-  driver for a block PV, and OpenEBS NDM's tag filter ensures only the
-  intended disk (`serial: ceph-osd-<host>`, tagged `ceph-osd`) can satisfy
-  the claim.
-- It is the canonical "cloud-native" Rook pattern. The same code paths run
-  in production on AWS gp3, GKE pd-ssd, etc.
-
-The trade-off is one extra component (OpenEBS) in the dependency chain. The
-bootstrap order accounts for that.
+The trade-off: the OSD's identity is tied to the host's device naming.
+We mitigate that by giving the second virtio-blk volume a stable
+`serial=ceph-osd-<hostname>`, which makes `systemd-udevd` create
+`/dev/disk/by-id/virtio-ceph-osd-<hostname>` — the CephCluster CR
+references that by-id path, not `/dev/vdb`, so PCI re-numbering across
+boots is irrelevant.
 
 ## Pools and StorageClasses
 
@@ -247,24 +253,39 @@ from a bare-metal box.
 |---|---|
 | Host | `client0` / `k8s-client0`, IP `10.33.33.20`, TAP `k8stap4`, console block 25540–25549 |
 | Disk | Single 4 GiB `${hostname}-data.img` mounted at `/var/lib`. No second disk. |
-| Resources | 2 GiB RAM, 1 vCPU. |
+| Resources | 2 GiB RAM, 2 vCPU (vCPU=2 so the netdev `queues=` matches the multi-queue TAP). |
 | Lifecycle | Independent of the cluster — `nix run .#k8s-client-start` / `…-stop` / `…-wipe`. NOT part of `k8s-start-all`. |
 
 ### MON exposure
 
-Three dedicated LoadBalancer VIPs (`10.33.33.55` / `.56` / `.57`), one
-per MON pod, ARP-announced by a new `lab-l2-rook`
-`CiliumL2AnnouncementPolicy`. The Cilium LB IP pool widened from
-`.50–.54` to `.50–.57` to cover them. The Services use selectors
-`app=rook-ceph-mon`, `mon_cluster=rook-ceph`,
-`ceph_daemon_id={a|b|c}` so each VIP routes to exactly one MON pod.
+Ceph daemons run on **`hostNetwork`**
+(`cephClusterSpec.network.provider: host` in
+`nix/gitops/env/rook-cluster.nix`). Each MON daemon binds to and
+advertises its node's actual IP (10.33.33.10 / .11 / .12) on port 6789
+(msgr-v1, the kernel default) and 3300 (msgr2).
 
-The client's `/etc/ceph/ceph.conf` is just:
+**Why not LB VIPs or pinned MON pod IPs.** The kernel CephFS client
+verifies that the address it connected to matches the address the MON
+advertised in the MON map ("wrong peer at address" error if not). On
+regular pod networking, Rook MONs advertise their **per-MON Service
+ClusterIP** (10.96.x.x range, dynamic), not the pod IP — so neither
+LoadBalancer VIPs nor pinning MON pod IPs via a `CiliumPodIPPool`
+sidesteps the mismatch. `hostNetwork` is the only mode where the
+advertised address equals an address an external client can reach.
+
+eBPF impact is minor: BPF programs still attach to each node's primary
+NIC, so inter-Ceph-daemon traffic across nodes is still processed by
+Cilium. What's lost is per-pod IPAM / policy / identity for the ~5 Ceph
+daemon types (mon/mgr/osd/mds/rgw) — none of which are perf-critical.
+All non-Ceph workloads still use multi-pool IPAM + BGPControlPlane
+(see [Network modes](#network-modes-bgp--multi-pool-ipam) below).
+
+The client's `/etc/ceph/ceph.conf` is generated in `nix/secrets.nix`
+from `constants.ceph.monHosts`:
 
 ```ini
 [global]
-mon_host = 10.33.33.55:3300,10.33.33.56:3300,10.33.33.57:3300
-ms_mode = prefer-crc
+mon_host = 10.33.33.10:6789,10.33.33.11:6789,10.33.33.12:6789
 ```
 
 ### CephX user (`client.external`)
@@ -299,13 +320,12 @@ client does the work and the secret is inlined into the mount options:
 
 ```nix
 fileSystems."/mnt/cephfs" = {
-  device = "10.33.33.55:3300,10.33.33.56:3300,10.33.33.57:3300:/";
+  device = "10.33.33.10:6789,10.33.33.11:6789,10.33.33.12:6789:/";
   fsType = "ceph";
   options = [
     "name=external"
     "secret=${cephClientSecret}"   # base64 key, inlined at build time
-    "fs=ceph-filesystem"
-    "ms_mode=prefer-crc"
+    "mds_namespace=ceph-filesystem"   # NOT `fs=`; newer kernels reject the old form
     "noatime" "_netdev"
     "x-systemd.requires=network-online.target"
     "x-systemd.after=network-online.target"
@@ -317,6 +337,19 @@ fileSystems."/mnt/cephfs" = {
 `mount.ceph` is not required — the kernel parses these options
 directly. `nofail` means the boot doesn't block forever if MONs are
 unreachable; SSH still comes up so the operator can diagnose.
+
+### bonnie++
+
+`pkgs.bonnie` (bonnie++) is in `systemPackages` for quick disk-I/O
+benchmarks against `/mnt/cephfs`. The total Ceph capacity is small
+(~10 GiB usable on the lab cluster) and bonnie++'s defaults assume a
+2× RAM dataset, so override the RAM hint when running with a smaller
+file:
+
+```bash
+nix run .#k8s-vm-ssh -- --node=client0 -- \
+  'bonnie++ -d /mnt/cephfs -s 512 -r 256 -n 0 -u root -q'
+```
 
 ### Bidirectional verification
 
@@ -338,29 +371,70 @@ nix run .#k8s-vm-ssh -- --node=cp0 -- \
 nix run .#k8s-vm-ssh -- --node=client0 -- 'cat /mnt/cephfs/pod.txt'
 ```
 
+## Network modes: BGP + multi-pool IPAM
+
+Cilium runs with **multi-pool IPAM** (`ipam.mode: multi-pool`) and two
+auto-created `CiliumPodIPPool`s:
+
+| Pool | CIDR | Per-pod mask | Used by |
+|---|---|---|---|
+| `default` | 10.244.0.0/18 | /24 (per-node slice) | every non-annotated pod |
+| `ceph-mon-pool` | 10.244.99.0/29 | /32 (per-pod) | pods annotated with `ipam.cilium.io/ip-pool: ceph-mon-pool` |
+
+`ceph-mon-pool` was provisioned for the experimental "pin MON pod IPs +
+route to them externally" design. That design is **currently unused**
+because Rook MONs advertise their per-MON Service ClusterIP (not the
+pod IP) in the MON map, which defeated the address-match check
+regardless of how MON pods were addressed. The pool is kept in place
+for future experiments; Ceph itself runs on hostNetwork (see
+[External CephFS client → MON exposure](#mon-exposure)).
+
+In parallel, `bgpControlPlane.enabled: true` is set in the Cilium Helm
+values and three CRDs are rendered under `rendered/cilium/`:
+
+- `CiliumBGPClusterConfig/lab-bgp-cluster` — every Linux node opens a
+  BGP session to the host peer (10.33.33.1)
+- `CiliumBGPPeerConfig/lab-bgp-peer` — eBGP, 10s keepalive / 30s
+  holdtime, IPv4 unicast, advertisement selector `advertise=bgp`
+- `CiliumBGPAdvertisement/lab-bgp-advert` — advertises every
+  `CiliumPodIPPool` slice the node has been allocated
+
+The cluster side is fully configured. **The host-side BGP peer is
+optional.** Two paths:
+
+| Path | What it does | Survives host reboot? |
+|---|---|---|
+| Static route (default) | `k8s-network-setup` runs `ip route replace 10.244.0.0/16 via 10.33.33.10 dev k8sbr0`. cp0 is the gateway; Cilium handles the rest. | Re-run `sudo nix run .#k8s-network-setup` after reboot |
+| FRR `bgpd` (optional) | Import `host-setup/frr-bgp.nix` into the host's `/etc/nixos/configuration.nix`, `nixos-rebuild switch`. FRR peers with each cluster node, computes the per-prefix best path. | Yes |
+
+Both paths give the host (and any microvm on the bridge, including
+client0) routable access to the pod CIDR. The Ceph external client
+doesn't currently rely on either — MONs are on hostNetwork — but the
+demo workload pods in `ceph-demo` get pod-CIDR addresses, and any
+external traffic to those pod IPs goes through the static route or BGP.
+
 ## Bootstrap and reconciliation
 
-The CephCluster does not come up by ArgoCD — it comes up by the
-**gitops-bootstrap** systemd unit on `cp0` during first boot, in this order:
+The bootstrap-critical components come up via the
+**k8s-gitops-bootstrap** systemd unit on `cp0` during first boot
+(defined in `nix/gitops-bootstrap-module.nix`). The unit:
 
-1. Wait for apiserver
-2. Apply Cilium (CNI); wait for the DaemonSet
-3. Apply base manifests (namespaces, RBAC, CoreDNS); wait for CoreDNS
-4. Apply cert-manager + ClusterIssuer; wait for the webhook
-5. **Apply OpenEBS Local PV Device**; wait for NDM and the controller
-6. **Apply Rook operator**; wait for the operator Deployment and the CRDs
-7. **Apply the CephCluster CR + pools + RGW + CephFS**; wait for
-   `cephcluster.status.phase == Ready` (up to 15 minutes — OSD prepare
-   takes ~3 minutes per OSD on first boot)
-8. Apply ArgoCD; wait for the server Deployment
-9. Apply pre-generated Secrets
-10. Apply all `Application` CRs — ArgoCD takes over from here
+1. Waits for the apiserver to answer.
+2. Applies the manifests baked into the VM image at
+   `/var/lib/k8s-bootstrap/` — Cilium install, base namespaces / RBAC /
+   CoreDNS, ArgoCD install, the ArgoCD `Application` CRs that point at
+   `rendered/` in git.
+3. Waits for the CephCluster CR to reach `status.phase == Ready` (up to
+   15 minutes — OSD prepare takes ~3 minutes per OSD on first boot).
 
-After step 10, ArgoCD reconciles `rendered/openebs-device/`,
-`rendered/rook-operator/`, `rendered/rook-cluster/`, and
-`rendered/ceph-demo/` from the cloned git repo. On any subsequent
-configuration change (e.g. bumping the OSD disk size or adding a pool),
-the workflow is:
+After that, **ArgoCD reconciles every other manifest from git**:
+`rendered/rook-operator/`, `rendered/rook-cluster/`,
+`rendered/ceph-demo/`, `rendered/ceph-external-client/`, etc. The Helm
+charts inside those directories are pre-rendered at Nix build time, so
+ArgoCD only does plain `kubectl apply --server-side`.
+
+On any subsequent configuration change (e.g. bumping the OSD disk size
+or adding a pool):
 
 ```bash
 $EDITOR nix/constants.nix nix/gitops/env/rook-cluster.nix
@@ -369,8 +443,14 @@ git add nix/ rendered/ && git commit && git push
 # ArgoCD detects the change within ~3 min and applies it.
 ```
 
-The bootstrap unit is idempotent — once `/var/lib/k8s-bootstrap/done`
-exists on `cp0`, it does not re-run on reboot.
+If the change is **bootstrap-critical** (anything Cilium, ArgoCD, or
+base, plus the in-image CephCluster spec), a fresh
+`nix run .#k8s-cluster-rebuild` is needed for it to take effect on the
+next cold boot — the bootstrap unit reads from the Nix store, not git.
+
+The bootstrap unit is idempotent — once
+`/var/lib/k8s-bootstrap/done` exists on `cp0`, it does not re-run on
+reboot.
 
 ## Failure modes and recovery
 
@@ -378,8 +458,7 @@ exists on `cp0`, it does not re-run on reboot.
 |---|---|---|
 | One node down | 1 OSD + maybe 1 MON down; HEALTH_WARN | Restart the node; OSD/MON re-join; cluster returns to HEALTH_OK in ~1 min |
 | Two nodes down | MON quorum lost (2 of 3 MONs gone); cluster halts I/O | Recover at least one node; manual MON quorum repair if needed |
-| One node's `*-ceph.img` corrupted | One OSD permanently down; HEALTH_WARN | Delete the image file on the host; restart VM; NDM re-discovers; new PV; Rook prepares a new OSD; data backfilled from surviving replicas |
-| OpenEBS controller down | New PVCs from `openebs-device` fail; existing PVCs unaffected | ArgoCD/Rook self-heal restarts the controller |
+| One node's `*-ceph.img` corrupted | One OSD permanently down; HEALTH_WARN | Delete the image file on the host; restart VM; `ceph-disk-init` wipes the fresh device; Rook prepares a new OSD; data backfilled from surviving replicas |
 | Rook operator down | No new daemons created; existing daemons unaffected | ArgoCD self-heal |
 | Apiserver / etcd quorum failure | Whole cluster halts | Same as the source repo — haproxy on the host bridge load-balances apiserver across the 3 CPs; etcd needs 2/3 |
 
@@ -398,11 +477,11 @@ nix run .#k8s-cluster-rebuild
 
 # Storage tier health
 nix run .#k8s-vm-ssh -- cp0 -- kubectl exec -n rook-ceph deploy/rook-ceph-tools -- ceph -s
-# expect: HEALTH_OK · 3 mons · 2 mgrs · 4 osd up,in · 3 mds · 2 rgw
+# expect: HEALTH_OK · 3 mons · 2 mgrs · 4 osd up,in · 3 mds · 1 rgw
 
 # StorageClasses present
 nix run .#k8s-vm-ssh -- cp0 -- kubectl get sc
-# expect: ceph-block (default) · ceph-filesystem · ceph-bucket · openebs-device
+# expect: ceph-block (default) · ceph-filesystem · ceph-bucket
 
 # Demo workload uses all three
 nix run .#k8s-vm-ssh -- cp0 -- kubectl -n ceph-demo get pvc,obc,pod
