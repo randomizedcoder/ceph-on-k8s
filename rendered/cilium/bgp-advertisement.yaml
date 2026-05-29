@@ -1,0 +1,14 @@
+apiVersion: cilium.io/v2
+kind: CiliumBGPAdvertisement
+metadata:
+  name: lab-bgp-advert
+  labels:
+    advertise: bgp
+spec:
+  advertisements:
+  # Advertise every pod-IP pool the node has a slice of (both
+  # `default` and `ceph-mon`). Cilium computes the actual
+  # per-node prefix at agent runtime; the host sees a /24 per
+  # node for `default` and a /32 per MON node for `ceph-mon`.
+  - advertisementType: CiliumPodIPPool
+

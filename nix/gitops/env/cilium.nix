@@ -22,16 +22,59 @@ let
     k8sServiceHost: "${constants.network.gateway4}"
     k8sServicePort: "6443"
 
+    # ─── IPAM: multi-pool ─────────────────────────────────────────
+    # Each pool is a CIDR slice that Cilium operator allocates from.
+    # Pods request a pool via annotation `ipam.cilium.io/ip-pool`;
+    # un-annotated pods land in `default`. The `ceph-mon` pool exists
+    # to pin Ceph MON pods to a small, deterministic range so external
+    # CephFS clients have a stable bootstrap list (see
+    # constants.ceph.monHosts + rook-cluster.nix annotations.mon).
+    # The pool CIDRs are BGP-advertised to the host so external clients
+    # (e.g. client0) can route directly to MON pod IPs — sidestepping
+    # the "wrong peer at address" mismatch that LB VIPs hit, because
+    # each MON now advertises its actual pinned pod IP in the MON map.
     ipam:
-      mode: kubernetes
+      mode: multi-pool
+      operator:
+        autoCreateCiliumPodIPPools:
+          # 10.244.0.0/18 (16 K IPs, /24 per node). Non-overlapping
+          # with the ceph-mon pool below — see the constants.nix
+          # comment on monPoolCidr.
+          default:
+            ipv4:
+              cidrs:
+                - "10.244.0.0/18"
+              maskSize: 24
+          # /29 (8 IPs, /32 per pod) — Cilium picks 3 from .1..6 for
+          # the 3 MONs. constants.ceph.monHosts lists every usable IP
+          # in this CIDR so the kernel client can bootstrap regardless
+          # of which IP a MON landed on. Name must match the
+          # `ipam.cilium.io/ip-pool` annotation set on the MON pod
+          # template by rook-cluster.nix.
+          ceph-mon-pool:
+            ipv4:
+              cidrs:
+                - "10.244.99.0/29"
+              maskSize: 32
 
+    # IPv6 disabled under multi-pool: we'd need a per-pool v6 CIDR for
+    # every pool; not worth the complexity for the lab.
     ipv4:
       enabled: true
     ipv6:
-      enabled: true
+      enabled: false
 
     bpf:
       masquerade: true
+
+    # ─── BGP control plane ───────────────────────────────────────
+    # Replaces L2 announce for the pod-CIDR advertisement (L2 announce
+    # is kept for the LoadBalancer Services). Each cilium-agent peers
+    # with FRR on the host (10.33.33.1) and announces the local node's
+    # pod-IP slice (per-node /24 of the default pool + per-MON /32 of
+    # the ceph-mon pool). See cilium-bgp-*.yaml manifests below.
+    bgpControlPlane:
+      enabled: true
 
     # ─── Hubble: flow visibility, UI, metrics ───────────────────────
     hubble:
@@ -188,6 +231,74 @@ in
           - ${constants.cilium.ingress.nic}
           externalIPs: true
           loadBalancerIPs: true
+      '';
+    }
+    # ─── BGP control plane: peer with FRR on host (10.33.33.1) ────
+    # eBGP between cluster (ASN 64512) and host (ASN 64513). Each
+    # cilium-agent on a node opens a TCP session to the host's bgpd
+    # and advertises whatever pod-IP slice that node has been
+    # allocated by the multi-pool IPAM operator.
+    {
+      name = "cilium/bgp-cluster-config.yaml";
+      content = ''
+        apiVersion: cilium.io/v2
+        kind: CiliumBGPClusterConfig
+        metadata:
+          name: lab-bgp-cluster
+        spec:
+          # Every Linux node in the cluster participates in BGP.
+          nodeSelector:
+            matchLabels:
+              kubernetes.io/os: linux
+          bgpInstances:
+          - name: lab-instance
+            localASN: 64512
+            peers:
+            - name: host-frr
+              peerASN: 64513
+              peerAddress: ${constants.network.gateway4}
+              peerConfigRef:
+                name: lab-bgp-peer
+      '';
+    }
+    {
+      name = "cilium/bgp-peer-config.yaml";
+      content = ''
+        apiVersion: cilium.io/v2
+        kind: CiliumBGPPeerConfig
+        metadata:
+          name: lab-bgp-peer
+        spec:
+          timers:
+            holdTimeSeconds: 30
+            keepAliveTimeSeconds: 10
+          gracefulRestart:
+            enabled: true
+            restartTimeSeconds: 120
+          families:
+          - afi: ipv4
+            safi: unicast
+            advertisements:
+              matchLabels:
+                advertise: bgp
+      '';
+    }
+    {
+      name = "cilium/bgp-advertisement.yaml";
+      content = ''
+        apiVersion: cilium.io/v2
+        kind: CiliumBGPAdvertisement
+        metadata:
+          name: lab-bgp-advert
+          labels:
+            advertise: bgp
+        spec:
+          advertisements:
+          # Advertise every pod-IP pool the node has a slice of (both
+          # `default` and `ceph-mon`). Cilium computes the actual
+          # per-node prefix at agent runtime; the host sees a /24 per
+          # node for `default` and a /32 per MON node for `ceph-mon`.
+          - advertisementType: CiliumPodIPPool
       '';
     }
     # Path-source Application — ArgoCD applies install.yaml and ignores the

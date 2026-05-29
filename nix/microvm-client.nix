@@ -43,8 +43,8 @@ let
   # CephFS mount device string. MONs run on hostNetwork (see the
   # constants.ceph comment) so we point straight at the node IPs on
   # port 6789 (msgr-v1, the kernel client default). Trailing `:/`
-  # asks for the root of the filesystem; the `fs=` (mds_namespace=)
-  # option selects which CephFS.
+  # asks for the root of the filesystem; the `mds_namespace=` option
+  # in fileSystems.options selects the CephFS.
   monMountTarget = lib.concatStringsSep "," constants.ceph.monHosts + ":/";
 
   vmConfig = nixpkgs.lib.nixosSystem {

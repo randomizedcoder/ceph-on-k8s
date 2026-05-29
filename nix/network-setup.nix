@@ -183,6 +183,19 @@ EOF
       sysctl -w net.ipv4.ip_forward=1 >/dev/null
       sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
 
+      # Static route to pod CIDR via cp0 — gives the host (and any
+      # microvm on this bridge, including client0) a way to reach
+      # Ceph MON pod IPs in the ceph-mon Cilium IPAM pool
+      # (10.244.99.0/29) and any other pod IP. cp0 then forwards via
+      # Cilium's per-node BPF routing. This is a poor-person's BGP:
+      # full Cilium BGPControlPlane is wired up in the cluster but
+      # requires a host-side FRR peer to actually carry the routes —
+      # see host-setup/frr-bgp.nix for the optional full setup. The
+      # static route is sufficient for the lab and survives a single
+      # cp0 outage worse than BGP would, but is much simpler.
+      echo "Installing static route to pod CIDR (${constants.k8s.podCidr4})..."
+      ip route replace ${constants.k8s.podCidr4} via ${constants.network.ipv4.cp0} dev ${bridge}
+
       # Start haproxy for apiserver load balancing
       if [[ -f /run/k8s-haproxy.pid ]] && kill -0 "$(cat /run/k8s-haproxy.pid)" 2>/dev/null; then
         echo "Stopping existing haproxy..."
@@ -194,10 +207,14 @@ EOF
       echo "haproxy started (PID: $(cat /run/k8s-haproxy.pid))"
 
       echo ""
-      echo "Network ready. Nodes:"
+      echo "Network ready. Cluster nodes:"
       ${builtins.concatStringsSep "\n" (builtins.map (n: ''
       echo "  ${n}: ${constants.network.ipv4.${n}} / ${constants.network.ipv6.${n}} (${constants.network.taps.${n}})"
       '') constants.nodeNames)}
+      echo "External clients:"
+      ${builtins.concatStringsSep "\n" (builtins.map (n: ''
+      echo "  ${n}: ${constants.network.ipv4.${n}} / ${constants.network.ipv6.${n}} (${constants.network.taps.${n}})"
+      '') constants.clientNodeNames)}
     '';
   };
 
@@ -211,6 +228,10 @@ EOF
         echo "ERROR: Run with sudo: sudo nix run .#k8s-network-teardown"
         exit 1
       fi
+
+      # Remove static route to pod CIDR (no-op if missing)
+      ip route del ${constants.k8s.podCidr4} 2>/dev/null && \
+        echo "Removed static route to ${constants.k8s.podCidr4}" || true
 
       # Stop haproxy
       if [[ -f /run/k8s-haproxy.pid ]]; then

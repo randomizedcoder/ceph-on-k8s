@@ -80,15 +80,25 @@ let
         ssl: false
 
       # ─── Network: hostNetwork ────────────────────────────────────
-      # MONs (and all other daemons) run in the host network namespace
-      # so each MON daemon binds to and advertises the node's actual
-      # IP (10.33.33.10/11/12) on ports 6789 (msgr-v1) + 3300 (msgr2).
-      # This is the standard Rook pattern for external clients: kernel
-      # CephFS clients verify that the address they connected to
-      # matches the address the MON advertised in the MON map. With
-      # regular pod networking, MONs advertise their pod IP (10.x.x.x)
-      # and external clients hitting a LoadBalancer VIP get rejected
-      # with "wrong peer at address". hostNetwork bypasses that.
+      # MONs (and all other Ceph daemons) run in the host network
+      # namespace so each MON daemon binds to and advertises its
+      # node's actual IP (10.33.33.10/11/12) on port 6789 (msgr-v1)
+      # + 3300 (msgr2). This is the standard Rook pattern for
+      # external clients (e.g. client0): the kernel CephFS client
+      # checks that the address it connected to matches the address
+      # the MON advertised in the MON map. With normal pod networking
+      # Rook MONs advertise their per-MON Service ClusterIP (not the
+      # pod IP), so even pinning the pod IP via Cilium multi-pool
+      # IPAM doesn't make external mounts work — the advertised
+      # address still mismatches what the client connected to.
+      # hostNetwork sidesteps both.
+      #
+      # eBPF preserved: Cilium's BPF programs attach to the node's
+      # primary NIC, so packets between Ceph daemons across nodes are
+      # still BPF-processed. The cost is per-pod IPAM/policy/identity
+      # for the ~5 Ceph daemon types (mon/mgr/osd/mds/rgw) — none of
+      # which are perf-critical. All non-Ceph workloads still use
+      # multi-pool IPAM + Cilium BGP — see cilium.nix.
       network:
         provider: host
 
@@ -291,11 +301,13 @@ ${perNodeDevicesYaml}
     values      = clusterValuesYaml;
   };
 
-  # MON LoadBalancer Services + L2 announce policy were removed when
-  # we switched to hostNetwork mode (`cephClusterSpec.network.provider
-  # = host` above). External clients now talk directly to the node IPs
-  # — see constants.ceph.monHosts and the client's /etc/ceph/ceph.conf
-  # generated in nix/secrets.nix.
+  # No MON LoadBalancer Services — external clients (e.g. client0)
+  # connect directly to MON pod IPs over the BGP-advertised pod CIDR.
+  # MON pod IPs are pinned to constants.ceph.monHosts via the
+  # `ceph-mon-pool` Cilium IPAM pool (see nix/gitops/env/cilium.nix);
+  # ceph.conf in secrets.nix enumerates every IP in the pool so the
+  # kernel client can bootstrap even though it doesn't know which IP
+  # any given MON landed on.
 in
 {
   manifests = [

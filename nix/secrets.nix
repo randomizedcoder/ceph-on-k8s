@@ -63,7 +63,7 @@ let
 
   # /etc/ceph/ceph.conf for the external client. MONs run on
   # hostNetwork so they advertise the node IPs directly — the list
-  # is constants.ceph.monHosts (cp0/cp1/cp2 on port 6789).
+  # is constants.ceph.monHosts (cp0/cp1/cp2 on port 6789, msgr-v1).
   cephConf = pkgs.writeText "ceph.conf" ''
     [global]
     mon_host = ${lib.concatStringsSep "," constants.ceph.monHosts}

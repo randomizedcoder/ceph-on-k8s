@@ -243,17 +243,19 @@ rec {
     dashboard = { host = "ceph.lab.local"; vip = "10.33.33.53"; };
     rgw       = { host = "s3.lab.local";   vip = "10.33.33.54"; };
 
-    # MONs run on hostNetwork (cephClusterSpec.network.provider=host)
-    # so each MON daemon binds to and advertises its node's actual IP
-    # (10.33.33.10/11/12) on port 6789 (msgr-v1) / 3300 (msgr2). The
-    # alternative — LoadBalancer Services + Cilium L2 announce — runs
-    # into a Ceph design constraint: MONs put their advertised address
-    # in the MON map, which on regular pod networking is the pod IP
-    # (10.x.x.x), and the kernel client rejects connections where the
-    # actual peer IP doesn't match the advertised one ("wrong peer at
-    # address"). hostNetwork bypasses the whole problem.
+    # MONs run on hostNetwork (cephClusterSpec.network.provider=host
+    # in rook-cluster.nix) so each MON daemon binds to and advertises
+    # its node's actual IP (10.33.33.10/11/12) on port 6789 (msgr-v1)
+    # / 3300 (msgr2). External clients (client0) mount with this list.
     #
-    # External clients (e.g. client0) mount with this list:
+    # Why not pinned-pod-IP + BGP: tried that — Cilium multi-pool
+    # IPAM + a per-MON CiliumPodIPPool pinned MON pods to a /29 but
+    # Rook MONs advertise their per-MON Service ClusterIP in the MON
+    # map, not the pod IP. The kernel client's address-match check
+    # ("wrong peer at address") fails regardless of how the pod is
+    # addressed. hostNetwork is the only mode where what's advertised
+    # equals what's reachable. The BGP + multi-pool wiring stays
+    # because non-Ceph workloads still benefit from it.
     monHosts = [
       "${network.ipv4.cp0}:6789"
       "${network.ipv4.cp1}:6789"
